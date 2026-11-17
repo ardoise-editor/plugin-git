@@ -1,0 +1,237 @@
+{
+  "id": "simpleedit.git",
+  "name": {
+    "en": "Git",
+    "fr": "Git"
+  },
+  "version": "1.0.0",
+  "api": 1,
+  "description": {
+    "en": "Commit, stash, log with its graph, branches and tags, push and pull, merge and rebase, patches, blame, the changed lines marked, diffs and conflicts in tabs",
+    "fr": "Commit, remisage, historique avec son graphe, branches et étiquettes, push et pull, fusion et rebase, patchs, blame, les lignes modifiées marquées, diffs et conflits en onglets"
+  },
+  "author": "SimpleEdit",
+  "repository": "simple-edit-app/plugin-git",
+  "license": "MIT",
+  "command": [
+    "bin/git"
+  ],
+  "events": [
+    "startup",
+    "active_file",
+    "file_saved",
+    "file_deleted",
+    "file_renamed"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "git.show",
+        "title": {
+          "en": "Git: Show",
+          "fr": "Git : afficher"
+        }
+      },
+      {
+        "id": "git.commit",
+        "title": {
+          "en": "Git: Commit",
+          "fr": "Git : commit"
+        }
+      },
+      {
+        "id": "git.push",
+        "title": {
+          "en": "Git: Push",
+          "fr": "Git : push"
+        }
+      },
+      {
+        "id": "git.pull",
+        "title": {
+          "en": "Git: Pull",
+          "fr": "Git : pull"
+        }
+      },
+      {
+        "id": "git.fetch",
+        "title": {
+          "en": "Git: Fetch",
+          "fr": "Git : fetch"
+        }
+      },
+      {
+        "id": "git.branches",
+        "title": {
+          "en": "Git: Branches",
+          "fr": "Git : branches"
+        }
+      },
+      {
+        "id": "git.log",
+        "title": {
+          "en": "Git: Log",
+          "fr": "Git : historique"
+        }
+      },
+      {
+        "id": "git.stash",
+        "title": {
+          "en": "Git: Stash",
+          "fr": "Git : remisage"
+        }
+      },
+      {
+        "id": "git.blame",
+        "title": {
+          "en": "Git: Annotate (Blame)",
+          "fr": "Git : annoter (blame)"
+        },
+        "menus": [
+          "editor"
+        ]
+      },
+      {
+        "id": "git.blame_close",
+        "title": {
+          "en": "Git: Close the Annotations",
+          "fr": "Git : fermer les annotations"
+        }
+      },
+      {
+        "id": "git.blame_previous",
+        "title": {
+          "en": "Git: Previous Version of the Line's Commit",
+          "fr": "Git : version d'avant le commit de la ligne"
+        },
+        "menus": [
+          "editor"
+        ]
+      },
+      {
+        "id": "git.blame_blanks",
+        "title": {
+          "en": "Git: Annotations Ignore Blanks (on/off)",
+          "fr": "Git : annotations sans les blancs (oui/non)"
+        }
+      },
+      {
+        "id": "git.blame_moves",
+        "title": {
+          "en": "Git: Annotations Detect Moves in the File (on/off)",
+          "fr": "Git : annotations avec les déplacements dans le fichier (oui/non)"
+        }
+      },
+      {
+        "id": "git.blame_across",
+        "title": {
+          "en": "Git: Annotations Detect Moves Across Files (on/off)",
+          "fr": "Git : annotations avec les déplacements entre fichiers (oui/non)"
+        }
+      },
+      {
+        "id": "git.blame_hide",
+        "title": {
+          "en": "Git: Hide the Commit of the Line from the Annotations",
+          "fr": "Git : masquer le commit de la ligne dans les annotations"
+        },
+        "menus": [
+          "editor"
+        ]
+      },
+      {
+        "id": "git.blame_show_hidden",
+        "title": {
+          "en": "Git: Annotations Show Hidden Commits",
+          "fr": "Git : annotations, réafficher les commits masqués"
+        }
+      },
+      {
+        "id": "git.file_diff",
+        "title": {
+          "en": "Git: Show the Changes of the File",
+          "fr": "Git : voir les modifications du fichier"
+        },
+        "menus": [
+          "editor",
+          "file"
+        ]
+      },
+      {
+        "id": "git.file_history",
+        "title": {
+          "en": "Git: History of the File",
+          "fr": "Git : historique du fichier"
+        },
+        "menus": [
+          "editor",
+          "file"
+        ]
+      },
+      {
+        "id": "git.file_history_selection",
+        "title": {
+          "en": "Git: History of the Selected Lines",
+          "fr": "Git : historique des lignes sélectionnées"
+        },
+        "menus": [
+          "editor"
+        ]
+      },
+      {
+        "id": "git.file_compare",
+        "title": {
+          "en": "Git: Compare the File with a Revision…",
+          "fr": "Git : comparer le fichier avec une révision…"
+        },
+        "menus": [
+          "editor",
+          "file"
+        ]
+      },
+      {
+        "id": "git.file_get",
+        "title": {
+          "en": "Git: Get the File from a Revision…",
+          "fr": "Git : reprendre le fichier d'une révision…"
+        },
+        "menus": [
+          "file"
+        ]
+      },
+      {
+        "id": "git.init",
+        "title": {
+          "en": "Git: Initialize a Repository",
+          "fr": "Git : initialiser un dépôt"
+        }
+      },
+      {
+        "id": "git.clone",
+        "title": {
+          "en": "Git: Clone a Repository…",
+          "fr": "Git : cloner un dépôt…"
+        }
+      }
+    ],
+    "panels": [
+      {
+        "id": "git",
+        "title": {
+          "en": "Git",
+          "fr": "Git"
+        },
+        "icon": "",
+        "location": "bottom"
+      },
+      {
+        "id": "settings",
+        "title": {
+          "en": "Git",
+          "fr": "Git"
+        },
+        "location": "settings"
+      }
+    ]
+  }
+}
