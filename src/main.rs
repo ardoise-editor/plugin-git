@@ -801,7 +801,10 @@ mod tests {
         std::fs::create_dir_all(&inner).unwrap();
         let file = inner.join("main.rs");
         std::fs::write(&file, "").unwrap();
-        assert_eq!(init_target(&file, std::slice::from_ref(&project)), Some(project));
+        assert_eq!(
+            init_target(&file, std::slice::from_ref(&project)),
+            Some(project)
+        );
         assert_eq!(init_target(&file, &[]), Some(inner));
         if let Some(home) = std::env::var_os("HOME") {
             assert_eq!(init_target(Path::new(&home), &[]), None);
