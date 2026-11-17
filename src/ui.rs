@@ -540,7 +540,7 @@ fn log_tab(g: &Git) -> Node {
     );
     let shown = match g.log_rev.as_str() {
         "HEAD" => t!("git.head_current").to_string(),
-        "--all" => all_branches(),
+        crate::git::history::ALL => all_branches(),
         crate::git::history::REFLOG => t!("git.reflog").to_string(),
         other => other.to_string(),
     };

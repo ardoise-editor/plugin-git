@@ -393,15 +393,29 @@ impl Merge {
 /// else (a conflict settled by hand, common lines or the inside of a
 /// conflict edited): that work must not be thrown away.
 pub fn choose(rebuilt: Option<&str>, disk: Option<&str>, swap: bool) -> Result<Merge, Unavailable> {
-    let from_rebuilt = rebuilt.and_then(|t| parse(t, swap));
-    let from_disk = disk.and_then(|t| parse(t, swap));
+    let text = choose_text(rebuilt, disk, swap)?;
+    parse(text, swap).ok_or(Unavailable::NotMergeable)
+}
+
+/// The text [`choose`] takes the conflicts from.
+pub fn choose_text<'a>(
+    rebuilt: Option<&'a str>,
+    disk: Option<&'a str>,
+    swap: bool,
+) -> Result<&'a str, Unavailable> {
+    let from_rebuilt = rebuilt.and_then(|t| parse(t, swap).map(|m| (t, m)));
+    let from_disk = disk.and_then(|t| parse(t, swap).map(|m| (t, m)));
     match (from_rebuilt, from_disk) {
-        (Some(r), Some(d)) if !d.same_sides(&r) => Ok(d),
-        (Some(r), _) if disk.is_none_or(|t| t.lines().any(|l| l.starts_with("<<<<<<<"))) => Ok(r),
+        (Some((_, r)), Some((d_text, d))) if !d.same_sides(&r) => Ok(d_text),
+        (Some((r_text, _)), _)
+            if disk.is_none_or(|t| t.lines().any(|l| l.starts_with("<<<<<<<"))) =>
+        {
+            Ok(r_text)
+        }
         // Markers gone: the file was settled by hand.
         (Some(_), None) => Err(Unavailable::Settled),
-        (Some(r), Some(_)) => Ok(r),
-        (None, Some(d)) => Ok(d),
+        (Some((r_text, _)), Some(_)) => Ok(r_text),
+        (None, Some((d_text, _))) => Ok(d_text),
         (None, None) => Err(Unavailable::NotMergeable),
     }
 }

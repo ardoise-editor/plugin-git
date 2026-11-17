@@ -8,7 +8,7 @@ Git in [SimpleEdit](https://github.com/simple-edit-app/simpleedit), in a panel u
 - **Branches**: local and remote branches and tags; checkout, merge, rebase, pull, fetch, push, force push, rename, delete, compare with the working tree.
 - **Tools**: the current file (compare with or get from a revision, history of the file or of the selected lines), push with options, remotes, patches, merge and rebase with options, clean, submodules and worktrees, clone, the repositories of the projects (fetch, pull, push them all).
 
-In the editor: the colors of changed files in the tree and on the tabs, the changed lines marked beside the text, the blame (`Git: Annotate`), diffs in tabs where blocks are staged or put back, and conflicts settled in a tab.
+In the editor: the branches and commits in Search Everywhere (Plugins tab), the colors of changed files in the tree and on the tabs, the changed lines marked beside the text, the blame (`Git: Annotate`), diffs in tabs where blocks are staged or put back, and conflicts settled in a tab.
 
 Its settings (Preferences › Plugins) say how Pull and merges are made, and how often to fetch.
 

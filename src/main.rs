@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use simpleedit_plugin::protocol::{
     AnnotationLine, Annotations, Context, DiffActionParams, DiffFile, DiffMode, DiffTabParams,
-    FileDecoration, FileState as Decoration, InitializeParams, MergeParams, Settings as Editor,
-    StatusParams, UiEvent,
+    FileDecoration, FileState as Decoration, InitializeParams, MergeParams, SearchItem,
+    Settings as Editor, StatusParams, UiEvent,
 };
 use simpleedit_plugin::{run, Host, Plugin};
 
@@ -67,7 +67,7 @@ impl Ctx {
             self.host.status(StatusParams {
                 id: "branch".into(),
                 text: Some(format!(
-                    "\u{e0a0} {}",
+                    "⎇ {}",
                     state::branch_label(&status.branch, status.ahead, status.behind)
                 )),
                 tooltip: Some(t!("git.title").to_string()),
@@ -140,7 +140,12 @@ impl Ctx {
             .unwrap_or_default();
         let reveal = self.with(|g| {
             match status {
-                Ok(status) => g.status = Some(status),
+                Ok(status) => {
+                    for said in news(g.status.as_ref(), &status) {
+                        self.host.notify(said);
+                    }
+                    g.status = Some(status);
+                }
                 Err(error) => g.notice = Some((error, true)),
             }
             g.refs = refs;
@@ -185,6 +190,9 @@ impl Ctx {
             return;
         };
         let changed = self.with(|g| {
+            for said in news(g.status.as_ref(), &status) {
+                self.host.notify(said);
+            }
             let changed = g.status.as_ref() != Some(&status);
             g.status = Some(status);
             changed
@@ -193,6 +201,22 @@ impl Ctx {
             self.render();
             self.decorate().await;
             self.resend_working_diffs().await;
+        }
+    }
+
+    /// The state of the working tree, panel closed: only what is worth
+    /// telling (new commits on the remote, conflicts) is said.
+    pub async fn quiet_status(&self) {
+        let Some(repo) = self.repo() else {
+            return;
+        };
+        if let Ok(status) = git::status(&repo, false).await {
+            self.with(|g| {
+                for said in news(g.status.as_ref(), &status) {
+                    self.host.notify(said);
+                }
+                g.status = Some(status);
+            });
         }
     }
 
@@ -344,6 +368,30 @@ impl Ctx {
             self.send_diffs(&id).await;
         }
     }
+}
+
+/// What changed that is worth telling: commits that came on the remote (a
+/// fetch, here or elsewhere), conflicts that appeared.
+pub fn news(before: Option<&git::Status>, now: &git::Status) -> Vec<String> {
+    let Some(before) = before else {
+        return Vec::new();
+    };
+    let mut said = Vec::new();
+    if before.branch == now.branch && now.behind > before.behind {
+        let upstream = now.upstream.clone().unwrap_or_default();
+        let n = now.behind - before.behind;
+        said.push(t!("git.behind_news", n = n, upstream = upstream.as_str()).to_string());
+    }
+    let conflicts = |s: &git::Status| {
+        s.unstaged
+            .iter()
+            .filter(|c| c.kind == git::Kind::Conflict)
+            .count()
+    };
+    if conflicts(before) == 0 && conflicts(now) > 0 {
+        said.push(t!("git.conflict_bar").to_string());
+    }
+    said
 }
 
 /// How a file of the Commit tab is diffed.
@@ -548,10 +596,17 @@ impl Plugin for GitPlugin {
         // The working tree while the panel is open, and the fetches.
         self.spawn(async move {
             let mut fetched = Instant::now();
+            let mut ticks: u64 = 0;
             loop {
                 tokio::time::sleep(TICK).await;
+                ticks += 1;
                 if ctx.open.load(std::sync::atomic::Ordering::Relaxed) {
                     ctx.tick().await;
+                } else if ticks.is_multiple_of(3) {
+                    // The colors of the files follow what is done elsewhere
+                    // (a terminal), and conflicts are told.
+                    ctx.decorate().await;
+                    ctx.quiet_status().await;
                 }
                 let minutes = ctx.with(|g| g.settings.auto_fetch_minutes);
                 if minutes > 0 && fetched.elapsed() >= Duration::from_secs(minutes as u64 * 60) {
@@ -685,6 +740,80 @@ impl Plugin for GitPlugin {
         });
     }
 
+    fn search_opened(&mut self, _: &Host) {
+        let ctx = self.ctx();
+        self.spawn(async move {
+            let Some(repo) = ctx.repo() else {
+                ctx.host.search_items(Vec::new());
+                return;
+            };
+            let refs = history::refs(&repo).await.unwrap_or_default();
+            let filter = history::LogFilter::default();
+            let commits = history::log_filtered(&repo, history::ALL, 2000, None, None, &filter)
+                .await
+                .unwrap_or_default();
+            let mut items: Vec<SearchItem> = refs
+                .branches
+                .iter()
+                .filter(|b| !b.name.ends_with("/HEAD"))
+                .map(|b| SearchItem {
+                    id: format!("branch:{}", b.name),
+                    label: b.name.clone(),
+                    detail: if b.remote {
+                        t!("git.branches_remote").to_string()
+                    } else {
+                        t!("git.branches_local").to_string()
+                    },
+                    icon: "\u{e725}".into(),
+                })
+                .collect();
+            items.extend(commits.iter().map(|c| SearchItem {
+                id: format!("commit:{}", c.sha),
+                label: c.subject.clone(),
+                detail: format!(
+                    "{} · {} · {}",
+                    &c.sha[..c.sha.len().min(8)],
+                    c.author,
+                    state::format_date(c.time)
+                ),
+                icon: "\u{eafc}".into(),
+            }));
+            ctx.host.search_items(items);
+        });
+    }
+
+    fn search_picked(&mut self, host: &Host, id: &str) {
+        let ctx = self.ctx();
+        if let Some(name) = id.strip_prefix("branch:") {
+            let name = name.to_string();
+            self.spawn(async move {
+                let Some(repo) = ctx.repo() else {
+                    return;
+                };
+                let refs = history::refs(&repo).await.unwrap_or_default();
+                let Some(branch) = refs.branches.into_iter().find(|b| b.name == name) else {
+                    return;
+                };
+                ctx.act(t!("git.checkout").to_string(), async {
+                    history::checkout(&repo, &branch)
+                        .await
+                        .map(|()| String::new())
+                })
+                .await;
+            });
+        } else if let Some(sha) = id.strip_prefix("commit:") {
+            ctx.with(|g| {
+                g.tab = Tab::Log;
+                g.search.clear();
+                g.log_path = None;
+                g.log_rev = history::ALL.into();
+                g.reveal = Some(sha.to_string());
+            });
+            host.show_panel(PANEL);
+            self.spawn(async move { ctx.refresh().await });
+        }
+    }
+
     fn annotation_clicked(&mut self, host: &Host, path: &Path, line: usize) {
         let ctx = self.ctx();
         let sha = ctx.with(|g| {
@@ -810,6 +939,62 @@ mod tests {
             assert_eq!(init_target(Path::new(&home), &[]), None);
         }
         assert_eq!(init_target(Path::new("/"), &[]), None);
+    }
+
+    #[test]
+    fn new_commits_on_the_remote_and_new_conflicts_are_told_once() {
+        let before = git::Status {
+            branch: "main".into(),
+            upstream: Some("origin/main".into()),
+            ..Default::default()
+        };
+        assert!(
+            news(None, &before).is_empty(),
+            "nothing before: nothing new"
+        );
+        let mut now = before.clone();
+        now.behind = 2;
+        let said = news(Some(&before), &now);
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains('2') && said[0].contains("origin/main"));
+        assert!(news(Some(&now), &now).is_empty(), "told once");
+        let mut conflicted = now.clone();
+        conflicted.unstaged.push(git::Change {
+            path: "a".into(),
+            from: None,
+            kind: git::Kind::Conflict,
+        });
+        assert_eq!(
+            news(Some(&now), &conflicted),
+            vec![t!("git.conflict_bar").to_string()]
+        );
+        assert!(news(Some(&conflicted), &conflicted).is_empty());
+        // Another branch: its distance to its remote is not news.
+        let mut other = now.clone();
+        other.branch = "topic".into();
+        other.behind = 9;
+        assert!(news(Some(&now), &other).is_empty());
+    }
+
+    #[test]
+    fn a_conflict_is_given_as_git_rebuilds_it_unless_the_file_was_worked_on() {
+        use git::conflicts::{choose_text, Unavailable};
+        let rebuilt = "a\n<<<<<<< ours\nx\n||||||| base\no\n=======\ny\n>>>>>>> theirs\nz\n";
+        let disk = "a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\nz\n";
+        // The same sides: what git rebuilt (it knows the base).
+        assert_eq!(choose_text(Some(rebuilt), Some(disk), false), Ok(rebuilt));
+        // Lines edited around the markers: the file on disk.
+        let edited = "a edited\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\nz\n";
+        assert_eq!(choose_text(Some(rebuilt), Some(edited), false), Ok(edited));
+        // Settled by hand.
+        assert_eq!(
+            choose_text(Some(rebuilt), Some("a\nxy\nz\n"), false),
+            Err(Unavailable::Settled)
+        );
+        assert_eq!(
+            choose_text(None, None, false),
+            Err(Unavailable::NotMergeable)
+        );
     }
 
     #[test]

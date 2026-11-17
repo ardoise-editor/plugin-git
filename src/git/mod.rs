@@ -4,8 +4,7 @@
 //! is parsed here (porcelain formats, never what a human is meant to read).
 //! Commands are async so the window never waits for one.
 
-// The conflicts are settled in the editor; the tests here use them.
-#[cfg(test)]
+// The conflicts are settled in the editor: which text is given to it.
 #[allow(dead_code)]
 pub mod conflicts;
 // How the editor draws a diff stays with the parsing, and its tests.

@@ -109,6 +109,10 @@ impl LogFilter {
 /// it.
 pub const REFLOG: &str = "@reflog";
 
+/// What stands in the place of a revision to list the history of every
+/// branch.
+pub const ALL: &str = "--all";
+
 /// How a commit's signature checks out, as a line to show: `None` when it
 /// is not signed (or git cannot tell).
 pub async fn signature(repo: &Path, sha: &str) -> Option<String> {
@@ -228,7 +232,12 @@ pub async fn log_filtered(
         args.retain(|a| *a != "--follow");
         path = None;
     }
-    args.extend(["--end-of-options", rev, "--"]);
+    // Every branch: an option, not a revision.
+    if rev == ALL {
+        args.extend(["--all", "--end-of-options", "--"]);
+    } else {
+        args.extend(["--end-of-options", rev, "--"]);
+    }
     args.extend(path);
     if !folder.is_empty() && path.is_none() {
         args.push(folder);
@@ -2495,5 +2504,36 @@ mod tests {
         };
         let lines = blame_with(repo.path(), None, "f", &options).await.unwrap();
         assert_eq!(lines[0].sha, first);
+    }
+
+    #[test]
+    fn the_history_of_every_branch_lists_the_commits_of_all() {
+        let repo = Repo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        repo.git(&["checkout", "-q", "-b", "topic"]);
+        repo.write("a.txt", "two\n");
+        repo.commit_all("on topic");
+        repo.git(&["checkout", "-q", "-"]);
+        let head = block(log_filtered(
+            repo.path(),
+            "HEAD",
+            50,
+            None,
+            None,
+            &LogFilter::default(),
+        ))
+        .unwrap();
+        assert!(head.iter().all(|c| c.subject != "on topic"));
+        let all = block(log_filtered(
+            repo.path(),
+            ALL,
+            50,
+            None,
+            None,
+            &LogFilter::default(),
+        ))
+        .unwrap();
+        assert!(all.iter().any(|c| c.subject == "on topic"));
     }
 }

@@ -194,6 +194,15 @@ pub fn command(p: &GitPlugin, ctx: &Ctx, host: &Host, command: &str, context: &C
             p.spawn(async move { blame_previous(&ctx, &host).await });
         }
         "git.init" => init(p, ctx),
+        "git.push_options" => {
+            ctx.with(|g| {
+                g.tab = Tab::Tools;
+                g.tool = Tool::Push;
+            });
+            host.show_panel(PANEL);
+            ctx.render();
+            tool_opened(p, ctx);
+        }
         "git.clone" => {
             ctx.with(|g| {
                 g.tab = Tab::Tools;
@@ -485,15 +494,26 @@ pub fn event(p: &GitPlugin, ctx: &Ctx, host: &Host, event: &UiEvent) {
                     let Some(repo) = ctx.repo() else {
                         return;
                     };
-                    match git::merge_text(&repo, &path).await {
-                        Some(text) => {
-                            if let Err(e) =
-                                host.open_merge(&format!("merge:{path}"), repo.join(&path), text)
+                    // As git rebuilds it (with its base), unless the file on
+                    // disk was worked on: that work is kept.
+                    let rebuilt = git::merge_text(&repo, &path).await;
+                    let disk = tokio::fs::read_to_string(repo.join(&path)).await.ok();
+                    let rebasing = git::operation(&repo).await == Some(git::Operation::Rebase);
+                    match git::conflicts::choose_text(rebuilt.as_deref(), disk.as_deref(), rebasing)
+                    {
+                        Ok(text) => {
+                            let tab = format!("merge:{path}");
+                            if let Err(e) = host.open_merge(&tab, repo.join(&path), text, rebasing)
                             {
                                 host.error(e.message);
                             }
                         }
-                        None => host.error(t!("git.not_mergeable")),
+                        Err(git::conflicts::Unavailable::Settled) => {
+                            host.notify(t!("git.already_resolved"))
+                        }
+                        Err(git::conflicts::Unavailable::NotMergeable) => {
+                            host.error(t!("git.not_mergeable"))
+                        }
                     }
                 });
                 return;
@@ -649,7 +669,7 @@ pub fn event(p: &GitPlugin, ctx: &Ctx, host: &Host, event: &UiEvent) {
         "log_rev" => {
             ctx.with(|g| {
                 g.log_rev = if text == crate::ui::all_branches() {
-                    "--all".into()
+                    history::ALL.into()
                 } else if text == t!("git.reflog") {
                     history::REFLOG.into()
                 } else if text == t!("git.head_current") {

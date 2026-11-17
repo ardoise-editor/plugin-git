@@ -249,6 +249,25 @@ fn the_plugin_shows_a_repository_and_commits_in_it() {
             || has(&notes["annotations"]["details"], "first")
     );
 
+    // Search Everywhere: the branches and the commits, and one picked.
+    editor.notify(methods::SEARCH_OPENED, Value::Null);
+    let items = editor.wait(methods::SEARCH_ITEMS, |p| has(p, "branch:topic"));
+    assert!(has(&items, "Second") && has(&items, "branch:main"));
+    let sha = git(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+    editor.notify(
+        methods::SEARCH_PICKED,
+        json!({"id": format!("commit:{sha}")}),
+    );
+    editor.wait(methods::SHOW_PANEL, |p| p["panel"] == "git");
+    editor.wait(methods::RENDER, |p| has(p, "\"tab:log\"") && has(p, &sha));
+    editor.notify(methods::SEARCH_PICKED, json!({"id": "branch:main"}));
+    let end = Instant::now() + Duration::from_secs(20);
+    while git(&repo, &["branch", "--show-current"]).trim() != "main" {
+        assert!(Instant::now() < end, "main checked out");
+        let _ = editor.from.recv_timeout(Duration::from_millis(200));
+    }
+    git(&repo, &["checkout", "-q", "topic"]);
+
     // A conflict, given to the editor to settle, then staged once settled.
     git(&repo, &["checkout", "-q", "-b", "other", "main~1"]);
     std::fs::write(repo.join("a.txt"), "one\nother\n").unwrap();

@@ -108,12 +108,16 @@ pub struct Settings {
     #[serde(default = "default_merge")]
     pub merge_mode: String,
     /// Fetch every so many minutes (0: never).
-    #[serde(default)]
+    #[serde(default = "default_fetch")]
     pub auto_fetch_minutes: u32,
 }
 
 fn default_pull() -> String {
     "merge".into()
+}
+
+fn default_fetch() -> u32 {
+    5
 }
 
 fn default_merge() -> String {
@@ -125,7 +129,7 @@ impl Default for Settings {
         Settings {
             pull_mode: default_pull(),
             merge_mode: default_merge(),
-            auto_fetch_minutes: 0,
+            auto_fetch_minutes: 5,
         }
     }
 }
