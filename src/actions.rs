@@ -4,9 +4,9 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use simpleedit_plugin::protocol::TreeAction;
-use simpleedit_plugin::protocol::{Context, DiffAction, DiffActionParams, UiEvent};
-use simpleedit_plugin::Host;
+use ardoise_plugin::protocol::TreeAction;
+use ardoise_plugin::protocol::{Context, DiffAction, DiffActionParams, UiEvent};
+use ardoise_plugin::Host;
 
 use crate::git::{self, history, tools, Change, Source};
 use crate::state::{Dialog, DiffTab, RefDialog, RepoLine, Tab, Tool};

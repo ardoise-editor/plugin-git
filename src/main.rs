@@ -21,12 +21,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use simpleedit_plugin::protocol::{
+use ardoise_plugin::protocol::{
     AnnotationLine, Annotations, Context, DeleteOption, DiffActionParams, DiffFile, DiffMode,
     DiffTabParams, FileDecoration, FileState as Decoration, InitializeParams, MergeParams,
     SearchItem, Settings as Editor, StatusParams, UiEvent,
 };
-use simpleedit_plugin::{run, Host, Plugin};
+use ardoise_plugin::{run, Host, Plugin};
 
 use git::{history, Change, Source};
 use state::{Blame, DiffTab, Git, Settings, Tab};

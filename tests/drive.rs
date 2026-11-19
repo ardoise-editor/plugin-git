@@ -9,8 +9,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
+use ardoise_plugin::protocol::{methods, read_message, write_message, Message};
 use serde_json::{json, Value};
-use simpleedit_plugin::protocol::{methods, read_message, write_message, Message};
 
 struct Editor {
     child: Child,

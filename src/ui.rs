@@ -1,6 +1,6 @@
 //! The Git panel as nodes the editor draws.
 
-use simpleedit_plugin::ui::{
+use ardoise_plugin::ui::{
     button, checkbox, column, editor, input, item, list, row, scroll, select, separator, space,
     text, tree, tree_item, ButtonStyle, Item, Node, TextStyle, TreeItem,
 };
