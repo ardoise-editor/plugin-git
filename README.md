@@ -1,6 +1,6 @@
-# Git — a SimpleEdit plugin
+# Git — an Ardoise Editor plugin
 
-Git in [SimpleEdit](https://github.com/simple-edit-app/simpleedit), in a panel under the editor:
+Git in [Ardoise Editor](https://github.com/ardoise-editor/ardoise), in a panel under the editor:
 
 - **Commit**: the staged and changed files, stage, unstage, roll back, delete, stash or ignore a file, commit (amend, sign-off, skip the hooks, author), commit and push, undo the last commit; the conflicts of a merge, rebase, cherry-pick or revert, and continue, skip or abort it.
 - **Stash**: stash (keeping the index, or the index only), apply, pop, drop, make a branch of a stash, its files.

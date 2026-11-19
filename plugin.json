@@ -4,14 +4,14 @@
     "en": "Git",
     "fr": "Git"
   },
-  "version": "1.2.1",
+  "version": "1.2.2",
   "api": 1,
   "description": {
     "en": "Commit, stash, log with its graph, branches and tags, push and pull, merge and rebase, patches, blame, the changed lines marked, diffs and conflicts in tabs",
     "fr": "Commit, remisage, historique avec son graphe, branches et étiquettes, push et pull, fusion et rebase, patchs, blame, les lignes modifiées marquées, diffs et conflits en onglets"
   },
-  "author": "SimpleEdit",
-  "repository": "simple-edit-app/plugin-git",
+  "author": "Ardoise Editor",
+  "repository": "ardoise-editor/plugin-git",
   "license": "MIT",
   "command": [
     "bin/git"

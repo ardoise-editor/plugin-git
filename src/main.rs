@@ -1,4 +1,4 @@
-//! The Git plugin of SimpleEdit: the changes to commit, the stashes, the log
+//! The Git plugin of Ardoise: the changes to commit, the stashes, the log
 //! with its graph, the branches and tags, the tools (push, remotes, patches,
 //! merge and rebase with options, clean, submodules and worktrees, clone,
 //! the repositories of the projects). In the editor: the colors of the
