@@ -57,6 +57,7 @@
   "git.date_format": "%d/%m/%Y",
   "git.datetime_format": "%d/%m/%Y %H:%M",
   "git.delete": "Supprimer",
+  "git.delete_from_git": "Supprimer aussi de Git",
   "git.delete_remote_tag": "Supprimer le tag sur origin",
   "git.diff_changes": "Modifications",
   "git.diff_staged": "Indexé",

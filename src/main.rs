@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use simpleedit_plugin::protocol::{
-    AnnotationLine, Annotations, Context, DiffActionParams, DiffFile, DiffMode, DiffTabParams,
-    FileDecoration, FileState as Decoration, InitializeParams, MergeParams, SearchItem,
-    Settings as Editor, StatusParams, UiEvent,
+    AnnotationLine, Annotations, Context, DeleteOption, DiffActionParams, DiffFile, DiffMode,
+    DiffTabParams, FileDecoration, FileState as Decoration, InitializeParams, MergeParams,
+    SearchItem, Settings as Editor, StatusParams, UiEvent,
 };
 use simpleedit_plugin::{run, Host, Plugin};
 
@@ -500,6 +500,10 @@ fn commit_card(line: &history::BlameLine) -> Vec<String> {
     card
 }
 
+/// The box of the question before a deletion that takes the file out of
+/// git too.
+const DELETE_FROM_GIT: &str = "git_rm";
+
 struct GitPlugin {
     ctx: Option<Ctx>,
     runtime: tokio::runtime::Runtime,
@@ -697,6 +701,33 @@ impl Plugin for GitPlugin {
     fn file_deleted(&mut self, _: &Host, _: &Path, _: Option<&str>) {
         let ctx = self.ctx();
         self.spawn(async move { ctx.refresh().await });
+    }
+
+    /// A file git tracks: a box to take it out of git too, ticked.
+    fn delete_options(&mut self, _: &Host, path: &Path) -> Vec<DeleteOption> {
+        let tracked = self.runtime.block_on(git::tracked_in(path)).is_some();
+        if !tracked {
+            return Vec::new();
+        }
+        vec![DeleteOption {
+            id: DELETE_FROM_GIT.into(),
+            label: t!("git.delete_from_git").to_string(),
+            checked: true,
+        }]
+    }
+
+    fn delete_chosen(&mut self, host: &Host, path: &Path, options: &[String]) {
+        if !options.iter().any(|o| o == DELETE_FROM_GIT) {
+            return;
+        }
+        let ctx = self.ctx();
+        let (path, host) = (path.to_path_buf(), host.clone());
+        self.spawn(async move {
+            if let Err(e) = git::untrack(&path).await {
+                host.error(e);
+            }
+            ctx.refresh().await;
+        });
     }
 
     fn file_renamed(&mut self, _: &Host, _: &Path, _: &Path) {

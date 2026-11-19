@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "simpleedit-git"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "rust-i18n",
@@ -632,8 +632,8 @@ dependencies = [
 
 [[package]]
 name = "simpleedit-plugin"
-version = "0.8.1"
-source = "git+https://github.com/simple-edit-app/plugin-sdk?tag=v0.8.1#fc5e72f32af81d645a221218cf2807198df276cb"
+version = "0.10.0"
+source = "git+https://github.com/simple-edit-app/plugin-sdk?tag=v0.10.0#a4401640aff448eb718834882b3597fbfc2dcc93"
 dependencies = [
  "serde",
  "serde_json",

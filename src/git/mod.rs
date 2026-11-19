@@ -1075,6 +1075,37 @@ pub async fn ignore_file(repo: &Path, path: &str) -> Result<bool, String> {
     Ok(tracked)
 }
 
+/// The repository of a file git tracks, and its path in it (`/` between
+/// folders); none when git does not track it.
+pub async fn tracked_in(path: &Path) -> Option<(PathBuf, String)> {
+    let root = repo_root(path).await?;
+    let rel = path
+        .strip_prefix(&root)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    if rel.is_empty() {
+        return None;
+    }
+    run(&root, &["ls-files", "--error-unmatch", "--", &rel])
+        .await
+        .ok()?;
+    Some((root, rel))
+}
+
+/// Takes a file git tracks out of the index (its deletion is staged; the
+/// file itself is left to whoever deletes it).
+pub async fn untrack(path: &Path) -> Result<(), String> {
+    match tracked_in(path).await {
+        Some((root, rel)) => run(&root, &["rm", "--cached", "-q", "--", &rel])
+            .await
+            .map(|_| ()),
+        None => Ok(()),
+    }
+}
+
 // ─── Diffs ──────────────────────────────────────────────────────────────────
 
 /// What a diff compares.

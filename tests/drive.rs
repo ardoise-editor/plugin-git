@@ -72,6 +72,27 @@ impl Editor {
         self.send(&Message::request(id, method, params));
     }
 
+    /// Asks the plugin, and waits for its answer.
+    fn ask(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.request(method, params);
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            match self.from.recv_timeout(left) {
+                Ok(Message::Response { id: got, result }) if got == id => {
+                    return result.expect("an answer");
+                }
+                Ok(Message::Request { id, .. }) => self.send(&Message::Response {
+                    id,
+                    result: Ok(Value::Null),
+                }),
+                Ok(_) => {}
+                Err(_) => panic!("no answer to {method}"),
+            }
+        }
+    }
+
     fn notify(&mut self, method: &str, params: Value) {
         self.send(&Message::notification(method, params));
     }
@@ -306,6 +327,45 @@ fn outside_of_a_repository_the_panel_offers_to_make_one() {
         has(p, "tab:commit") && has(p, "Nothing to commit")
     });
     assert!(project.join(".git").is_dir());
+}
+
+#[test]
+fn deleting_a_tracked_file_offers_to_take_it_out_of_git_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = std::fs::canonicalize(dir.path()).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("kept.txt"), "a\n").unwrap();
+    std::fs::write(repo.join("loose.txt"), "b\n").unwrap();
+    git(&repo, &["add", "kept.txt"]);
+    git(&repo, &["commit", "-q", "-m", "first"]);
+    let data = tempfile::tempdir().unwrap();
+    let mut editor = Editor::start(data.path(), &repo);
+    let tracked = editor.ask(
+        methods::DELETE_OPTIONS,
+        json!({"path": repo.join("kept.txt")}),
+    );
+    assert_eq!(tracked["options"][0]["id"], "git_rm");
+    assert_eq!(tracked["options"][0]["checked"], true);
+    assert_eq!(tracked["options"][0]["label"], "Also remove it from Git");
+    let loose = editor.ask(
+        methods::DELETE_OPTIONS,
+        json!({"path": repo.join("loose.txt")}),
+    );
+    assert_eq!(loose["options"], json!([]), "git does not track it");
+    // The box left ticked: the deletion is staged.
+    editor.notify(
+        methods::FILE_DELETED,
+        json!({"path": repo.join("kept.txt"), "options": ["git_rm"]}),
+    );
+    let end = Instant::now() + Duration::from_secs(20);
+    while !git(&repo, &["status", "--porcelain"]).contains("D  kept.txt") {
+        assert!(
+            Instant::now() < end,
+            "{}",
+            git(&repo, &["status", "--porcelain"])
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[test]
