@@ -93,13 +93,16 @@ fn armed_button(g: &Git, label: String, action: &str, enabled: bool) -> Node {
 /// The whole panel: the tabs, what is said, then the tab.
 pub fn panel(g: &Git) -> Node {
     let free = g.busy.is_none();
+    // Outside of a repository there is nothing to go from one tab to another
+    // for: they are all off, and the panel says how to get one.
+    let in_repo = g.repo.is_some();
     let tab = |label: String, action: &str, this: Tab| {
-        let style = if g.tab == this {
+        let style = if g.tab == this && in_repo {
             ButtonStyle::Primary
         } else {
             ButtonStyle::Ghost
         };
-        button(label, action).button_style(style)
+        button(label, action).button_style(style).enabled(in_repo)
     };
     let mut header = vec![
         tab(t!("git.tab_commit").to_string(), "tab:commit", Tab::Commit),
@@ -149,9 +152,9 @@ pub fn panel(g: &Git) -> Node {
     }
     body.push(separator());
     let content = match (&g.repo, g.tab) {
-        (_, Tab::Tools) => tools_tab(g),
         (None, _) if g.searched => no_repository(g),
         (None, _) => space(0.0),
+        (_, Tab::Tools) => tools_tab(g),
         (Some(_), Tab::Commit) => commit_tab(g),
         (Some(_), Tab::Stash) => stash_tab(g),
         (Some(_), Tab::Log) => log_tab(g),
@@ -166,10 +169,25 @@ fn no_repository(g: &Git) -> Node {
         Some(dir) => t!("git.init_in", dir = dir.display().to_string()).to_string(),
         None => t!("git.init").to_string(),
     };
+    let free = g.busy.is_none();
     column([
         text(t!("git.no_repo").to_string()).style(TextStyle::Muted),
-        button(init, "init").enabled(g.busy.is_none() && g.init_dir.is_some()),
-        tool_button(t!("git.clone_action").to_string(), "tab:tools", true),
+        button(init, "init").enabled(free && g.init_dir.is_some()),
+        separator(),
+        text(t!("git.clone_action").to_string()).style(TextStyle::Bold),
+        input(
+            "clone_url",
+            g.clone_url.clone(),
+            t!("git.clone_url").to_string(),
+        ),
+        input(
+            "clone_dest",
+            g.clone_dest.clone(),
+            t!("git.clone_dest").to_string(),
+        ),
+        button(t!("git.clone").to_string(), "clone:run")
+            .button_style(ButtonStyle::Primary)
+            .enabled(free && !g.clone_url.trim().is_empty()),
     ])
     .spacing(8.0)
 }
@@ -1548,6 +1566,64 @@ mod tests {
         };
         assert_eq!(graph_text(&row, 3, true), "│●│");
         assert_eq!(graph_text(&row, 3, false), "│○│");
+    }
+
+    /// The `enabled` of the button with this action, in a drawn panel.
+    fn enabled_of(node: &Node, action: &str) -> Option<bool> {
+        let json = serde_json::to_value(node).unwrap();
+        fn find(v: &serde_json::Value, action: &str) -> Option<bool> {
+            if v["action"] == action {
+                return Some(v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true));
+            }
+            match v {
+                serde_json::Value::Object(m) => m.values().find_map(|c| find(c, action)),
+                serde_json::Value::Array(a) => a.iter().find_map(|c| find(c, action)),
+                _ => None,
+            }
+        }
+        find(&json, action)
+    }
+
+    #[test]
+    fn outside_of_a_repository_the_tabs_are_off_and_the_panel_offers_init_and_clone() {
+        let mut g = Git::new();
+        g.searched = true;
+        let page = panel(&g);
+        for tab in [
+            "tab:commit",
+            "tab:stash",
+            "tab:log",
+            "tab:branches",
+            "tab:tools",
+        ] {
+            assert_eq!(enabled_of(&page, tab), Some(false), "{tab}");
+        }
+        // Even when the Tools tab was the one open: the same panel.
+        g.tab = Tab::Tools;
+        assert_eq!(enabled_of(&panel(&g), "tab:log"), Some(false));
+        // Cloning does not need a repository: its form is right there, and
+        // its button waits for an address.
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("clone_url") && drawn.contains("clone:run"));
+        assert_eq!(enabled_of(&panel(&g), "clone:run"), Some(false));
+        g.clone_url = "https://example.com/a.git".into();
+        assert_eq!(enabled_of(&panel(&g), "clone:run"), Some(true));
+    }
+
+    #[test]
+    fn in_a_repository_the_tabs_are_on() {
+        let mut g = Git::new();
+        g.repo = Some(std::path::PathBuf::from("/repo"));
+        let page = panel(&g);
+        for tab in [
+            "tab:commit",
+            "tab:stash",
+            "tab:log",
+            "tab:branches",
+            "tab:tools",
+        ] {
+            assert_eq!(enabled_of(&page, tab), Some(true), "{tab}");
+        }
     }
 
     #[test]
