@@ -341,7 +341,9 @@ fn commit_tab(g: &Git) -> Node {
     if status.staged.is_empty() && status.unstaged.is_empty() {
         lists.push(text(t!("git.nothing_to_commit").to_string()).style(TextStyle::Muted));
     }
-    parts.push(scroll(column(lists).spacing(4.0)).height(220.0));
+    // The lists take the room left: the message and the buttons under them
+    // stay in sight, however low the panel is.
+    parts.push(scroll(column(lists).spacing(4.0)));
 
     // What can be done to the file picked.
     if let Some((staged, path)) = &g.picked {
@@ -736,6 +738,12 @@ fn log_tab(g: &Git) -> Node {
                 ),
                 tool_button(t!("git.reword").to_string(), "log:reword", free && n == 1),
                 tool_button(t!("git.squash").to_string(), "log:squash", free && n > 1),
+            ])
+            .spacing(2.0),
+        );
+        // A row of their own: eight in one are wider than the window in French.
+        parts.push(
+            row([
                 armed_button(g, t!("git.drop").to_string(), "confirm:log:drop", free),
                 tool_button(t!("git.fixup").to_string(), "log:fixup", free && n == 1),
                 tool_button(
@@ -1756,6 +1764,18 @@ mod tests {
             }
         }
         find(&json, action)
+    }
+
+    #[test]
+    fn the_lists_of_changes_leave_room_for_the_message_under_them() {
+        // A height of their own would push the commit buttons out of a low
+        // panel: they take what is left.
+        let mut g = Git::new();
+        g.status = Some(Default::default());
+        let json = serde_json::to_value(commit_tab(&g)).unwrap();
+        let parts = json["children"].as_array().unwrap();
+        let lists = parts.iter().find(|p| p["type"] == "scroll").unwrap();
+        assert!(lists.get("height").is_none(), "{lists}");
     }
 
     #[test]
