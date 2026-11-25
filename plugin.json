@@ -4,7 +4,7 @@
     "en": "Git",
     "fr": "Git"
   },
-  "version": "1.3.0",
+  "version": "1.4.0",
   "api": 1,
   "description": {
     "en": "Commit, stash, log with its graph, branches and tags, push and pull, merge and rebase, patches, blame, the changed lines marked, diffs and conflicts in tabs",

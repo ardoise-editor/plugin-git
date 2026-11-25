@@ -497,9 +497,35 @@ pub async fn checkout(repo: &Path, branch: &Branch) -> Result<(), String> {
             .name
             .split_once('/')
             .map_or(branch.name.as_str(), |(_, b)| b);
-        // The local branch may already exist.
-        if run(repo, &["checkout", local]).await.is_ok() {
-            return Ok(());
+        // A local branch of that name is gone to only when it is that branch:
+        // it follows it, or stands at the same commit. Else the user would
+        // find themselves somewhere else without a word.
+        let reference = format!("refs/heads/{local}");
+        let found = run(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(upstream:short)%00%(objectname)",
+                &reference,
+            ],
+        )
+        .await?;
+        if let Some(line) = found
+            .lines()
+            .find(|l| l.split('\0').next() == Some(&reference))
+        {
+            let mut parts = line.split('\0').skip(1);
+            let upstream = parts.next().unwrap_or("");
+            let at = parts.next().unwrap_or("");
+            if upstream != branch.name && at != branch.sha {
+                return Err(t!(
+                    "git.err_local_taken",
+                    local = local,
+                    remote = branch.name.as_str()
+                )
+                .to_string());
+            }
+            return run(repo, &["checkout", local]).await.map(|_| ());
         }
         run(repo, &["checkout", "--track", &branch.name])
             .await
@@ -1020,6 +1046,7 @@ pub(super) async fn rebase_todo(
     todo: &str,
     files: &[(String, std::path::PathBuf)],
 ) -> Result<(), String> {
+    super::ensure_idle(repo).await?;
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let todo_path = dir.path().join("todo");
     tokio::fs::write(&todo_path, todo)
@@ -1322,6 +1349,7 @@ async fn oldest_of(repo: &Path, shas: &[String]) -> Result<String, String> {
 
 /// Adds commits that undo `shas` (newest first).
 pub async fn revert(repo: &Path, shas: &[String]) -> Result<(), String> {
+    super::ensure_idle(repo).await?;
     let mut args = vec!["revert", "--no-edit"];
     args.extend(shas.iter().map(String::as_str));
     match run(repo, &args).await {
@@ -1332,6 +1360,7 @@ pub async fn revert(repo: &Path, shas: &[String]) -> Result<(), String> {
 
 /// Copies commits (oldest first) onto the current branch.
 pub async fn cherry_pick(repo: &Path, shas: &[String]) -> Result<(), String> {
+    super::ensure_idle(repo).await?;
     let mut args = vec!["cherry-pick"];
     args.extend(shas.iter().map(String::as_str));
     match run(repo, &args).await {

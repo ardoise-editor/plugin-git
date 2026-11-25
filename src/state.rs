@@ -37,12 +37,14 @@ pub enum Tool {
     Rebase,
     Clean,
     Trees,
+    Bisect,
+    Identity,
     Clone,
     Repos,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 10] = [
+    pub const ALL: [Tool; 12] = [
         Tool::File,
         Tool::Push,
         Tool::Remotes,
@@ -51,6 +53,8 @@ impl Tool {
         Tool::Rebase,
         Tool::Clean,
         Tool::Trees,
+        Tool::Bisect,
+        Tool::Identity,
         Tool::Clone,
         Tool::Repos,
     ];
@@ -65,6 +69,8 @@ impl Tool {
             Tool::Rebase => t!("git.rebase_options"),
             Tool::Clean => t!("git.clean_title"),
             Tool::Trees => t!("git.trees_title"),
+            Tool::Bisect => t!("git.bisect_title"),
+            Tool::Identity => t!("git.identity_title"),
             Tool::Clone => t!("git.clone_title"),
             Tool::Repos => t!("git.repos_title"),
         }
@@ -286,6 +292,22 @@ pub struct Git {
     pub clean_ignored: bool,
     pub submodules: Vec<crate::git::tools::Submodule>,
     pub worktrees: Vec<crate::git::tools::Worktree>,
+    pub submodule_url: String,
+    pub submodule_path: String,
+    pub worktree_folder: String,
+    pub worktree_branch: String,
+    /// The worktree to make gets a branch of its own.
+    pub worktree_new: bool,
+    /// A worktree git would not remove: it can then be forced.
+    pub worktree_kept: Option<PathBuf>,
+    /// The search for a fault under way.
+    pub bisect: Option<crate::git::tools::Bisect>,
+    pub bisect_good: String,
+    pub bisect_bad: String,
+    pub identity: crate::git::tools::Identity,
+    pub identity_name: String,
+    pub identity_email: String,
+    pub identity_key: String,
     pub clone_url: String,
     pub clone_dest: String,
     pub repos: Vec<RepoLine>,
@@ -302,6 +324,7 @@ impl Git {
             limit: PAGE,
             log_rev: "HEAD".into(),
             reset_mode: "mixed".into(),
+            worktree_new: true,
             ..Git::default()
         }
     }

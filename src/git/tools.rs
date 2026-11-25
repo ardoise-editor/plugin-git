@@ -114,6 +114,247 @@ pub async fn submodules_update(repo: &Path) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// Adds a repository as a submodule, in the folder `path` of this one.
+pub async fn submodule_add(repo: &Path, url: &str, path: &str) -> Result<(), String> {
+    let (url, path) = (url.trim(), path.trim());
+    if url.is_empty() || url.starts_with('-') {
+        return Err(t!("git.err_clone_url").to_string());
+    }
+    if path.is_empty() || path.starts_with('-') {
+        return Err(t!("git.err_submodule_path").to_string());
+    }
+    super::run_network(repo, &["submodule", "add", "--", url, path])
+        .await
+        .map(|_| ())
+}
+
+/// Makes a worktree in `folder`: on a new branch `branch` made where HEAD
+/// is, or on the branch (or commit) `branch` that exists.
+pub async fn worktree_add(
+    repo: &Path,
+    folder: &str,
+    branch: &str,
+    new_branch: bool,
+) -> Result<(), String> {
+    let (folder, branch) = (folder.trim(), branch.trim());
+    if folder.is_empty() || folder.starts_with('-') {
+        return Err(t!("git.err_worktree_folder").to_string());
+    }
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err(t!("git.err_branch_name").to_string());
+    }
+    let args: Vec<&str> = if new_branch {
+        vec!["worktree", "add", "-b", branch, "--", folder]
+    } else {
+        vec!["worktree", "add", "--", folder, branch]
+    };
+    run(repo, &args).await.map(|_| ())
+}
+
+/// Removes a worktree and its folder. Without `force`, git keeps one that
+/// holds changes or files it does not know.
+pub async fn worktree_remove(repo: &Path, folder: &Path, force: bool) -> Result<(), String> {
+    let folder = folder.to_string_lossy();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.extend(["--", folder.as_ref()]);
+    run(repo, &args).await.map(|_| ())
+}
+
+// ─── Bisect ─────────────────────────────────────────────────────────────────
+
+/// What is said of the commit a bisect has checked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Good,
+    Bad,
+    /// It cannot be tried: another one near it is taken.
+    Skip,
+}
+
+/// A search for the commit that brought a fault, as it stands.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Bisect {
+    /// The commit to try: its short name and its subject.
+    pub current: String,
+    /// The first bad commit, once found (its full name).
+    pub found: Option<String>,
+    /// What git last said (how many commits are left).
+    pub said: String,
+}
+
+/// The commit git names as the first bad one: `<sha> is the first bad
+/// commit`, with quotes around `bad` since git 2.5x.
+fn first_bad(said: &str) -> Option<String> {
+    said.lines().find_map(|line| {
+        let (sha, rest) = line.split_once(" is the first ")?;
+        let word = rest.strip_suffix(" commit")?.trim_matches('\'');
+        let is_sha = sha.len() >= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+        (is_sha && word == "bad").then(|| sha.to_string())
+    })
+}
+
+/// git's words are read here: they must not be translated.
+async fn bisect_run(repo: &Path, args: &[&str]) -> Result<Bisect, String> {
+    let said = run_with(repo, args, None, &[("LC_ALL", "C")]).await?;
+    let found = first_bad(&said);
+    let current = run(repo, &["log", "-1", "--format=%h %s"]).await?;
+    Ok(Bisect {
+        current: current.trim().to_string(),
+        found,
+        said: said.lines().next().unwrap_or_default().to_string(),
+    })
+}
+
+/// Whether a bisect is under way.
+pub async fn bisecting(repo: &Path) -> bool {
+    match run(repo, &["rev-parse", "--absolute-git-dir"]).await {
+        Ok(dir) => Path::new(dir.trim()).join("BISECT_START").exists(),
+        Err(_) => false,
+    }
+}
+
+/// The commit a bisect under way has checked out.
+pub async fn bisect_current(repo: &Path) -> Option<Bisect> {
+    if !bisecting(repo).await {
+        return None;
+    }
+    let current = run(repo, &["log", "-1", "--format=%h %s"]).await.ok()?;
+    Some(Bisect {
+        current: current.trim().to_string(),
+        ..Bisect::default()
+    })
+}
+
+/// Starts looking between a revision that has the fault and one that does
+/// not. What is not committed must be put aside first: the search checks
+/// commits out.
+pub async fn bisect_start(repo: &Path, bad: &str, good: &str) -> Result<Bisect, String> {
+    super::ensure_idle(repo).await?;
+    if bisecting(repo).await {
+        return Err(t!("git.err_bisecting").to_string());
+    }
+    let changed = run(repo, &["status", "--porcelain", "--untracked-files=no"]).await?;
+    if !changed.trim().is_empty() {
+        return Err(t!("git.err_bisect_dirty").to_string());
+    }
+    let bad = bad.trim();
+    let bad = if bad.is_empty() { "HEAD" } else { bad };
+    let bad = super::verify_rev(repo, bad).await?;
+    let good = super::verify_rev(repo, good.trim()).await?;
+    let started = bisect_run(repo, &["bisect", "start", &bad, &good, "--"]).await;
+    if started.is_err() && bisecting(repo).await {
+        // Refused (the revisions the wrong way round): nothing is left over.
+        let _ = run(repo, &["bisect", "reset"]).await;
+    }
+    started
+}
+
+pub async fn bisect_mark(repo: &Path, verdict: Verdict) -> Result<Bisect, String> {
+    let word = match verdict {
+        Verdict::Good => "good",
+        Verdict::Bad => "bad",
+        Verdict::Skip => "skip",
+    };
+    bisect_run(repo, &["bisect", word]).await
+}
+
+/// Ends the search and goes back where it started from.
+pub async fn bisect_stop(repo: &Path) -> Result<(), String> {
+    run(repo, &["bisect", "reset"]).await.map(|_| ())
+}
+
+// ─── Identity ───────────────────────────────────────────────────────────────
+
+/// Who commits in a repository, and how the commits are signed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Identity {
+    /// What a commit made now would carry.
+    pub name: String,
+    pub email: String,
+    /// The name or the email is the repository's own.
+    pub own: bool,
+    pub signing_key: String,
+    /// Every commit of the repository is signed.
+    pub sign_all: bool,
+}
+
+async fn config(repo: &Path, args: &[&str]) -> String {
+    let mut all = vec!["config"];
+    all.extend(args);
+    // A key that is not set is an exit status, not a failure.
+    run(repo, &all)
+        .await
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+pub async fn identity(repo: &Path) -> Identity {
+    Identity {
+        name: config(repo, &["--get", "user.name"]).await,
+        email: config(repo, &["--get", "user.email"]).await,
+        own: !config(repo, &["--local", "--get", "user.name"])
+            .await
+            .is_empty()
+            || !config(repo, &["--local", "--get", "user.email"])
+                .await
+                .is_empty(),
+        signing_key: config(repo, &["--get", "user.signingkey"]).await,
+        sign_all: config(repo, &["--type=bool", "--get", "commit.gpgsign"]).await == "true",
+    }
+}
+
+/// Gives the repository an identity of its own. The global one is not
+/// touched.
+pub async fn set_identity(repo: &Path, name: &str, email: &str) -> Result<(), String> {
+    let (name, email) = (name.trim(), email.trim());
+    if name.is_empty() || !email.contains('@') {
+        return Err(t!("git.err_identity").to_string());
+    }
+    run(repo, &["config", "--local", "user.name", name]).await?;
+    run(repo, &["config", "--local", "user.email", email])
+        .await
+        .map(|_| ())
+}
+
+/// Takes a key out of the repository's own settings, if it is there.
+async fn unset_local(repo: &Path, key: &str) -> Result<(), String> {
+    if config(repo, &["--local", "--get", key]).await.is_empty() {
+        return Ok(());
+    }
+    run(repo, &["config", "--local", "--unset-all", key])
+        .await
+        .map(|_| ())
+}
+
+/// Goes back to the global identity.
+pub async fn clear_identity(repo: &Path) -> Result<(), String> {
+    unset_local(repo, "user.name").await?;
+    unset_local(repo, "user.email").await
+}
+
+/// The key the commits of the repository are signed with (empty: the one of
+/// the global settings).
+pub async fn set_signing_key(repo: &Path, key: &str) -> Result<(), String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return unset_local(repo, "user.signingkey").await;
+    }
+    run(repo, &["config", "--local", "user.signingkey", key])
+        .await
+        .map(|_| ())
+}
+
+/// Whether every commit of the repository is signed.
+pub async fn set_sign_all(repo: &Path, on: bool) -> Result<(), String> {
+    let value = if on { "true" } else { "false" };
+    run(repo, &["config", "--local", "commit.gpgsign", value])
+        .await
+        .map(|_| ())
+}
+
 /// A worktree of the repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
@@ -154,6 +395,8 @@ pub struct CommitOptions {
     pub signoff: bool,
     /// The hooks are not run.
     pub no_verify: bool,
+    /// The commit is signed (GPG or SSH, as git is set up).
+    pub sign: bool,
 }
 
 impl CommitOptions {
@@ -169,6 +412,9 @@ impl CommitOptions {
         }
         if self.no_verify {
             args.push("--no-verify".to_string());
+        }
+        if self.sign {
+            args.push("--gpg-sign".to_string());
         }
         args
     }
@@ -345,6 +591,7 @@ pub async fn update_and_push(repo: &Path, spec: &PushSpec, mode: PullMode) -> Re
 /// Adds what is staged to a commit of the branch: a fixup drops the new
 /// message; `squash` (nothing to write) keeps the commit's as it is too.
 pub async fn fixup(repo: &Path, sha: &str, squash: bool) -> Result<(), String> {
+    super::ensure_idle(repo).await?;
     let staged = run(repo, &["diff", "--cached", "--name-only"]).await?;
     if staged.trim().is_empty() {
         return Err(t!("git.err_nothing_staged").to_string());
@@ -491,6 +738,8 @@ pub async fn apply_patch(repo: &Path, patch: &str) -> Result<(), String> {
         return Err(t!("git.err_empty_patch").to_string());
     }
     if is_mail_patch(patch) {
+        // `am --abort` would also end an `am` or a rebase left half done.
+        super::ensure_idle(repo).await?;
         return match run_with(repo, &["am", "--3way"], Some(patch), &[]).await {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -550,6 +799,7 @@ impl MergeOptions {
 }
 
 pub async fn merge(repo: &Path, branch: &str, options: &MergeOptions) -> Result<(), String> {
+    super::ensure_idle(repo).await?;
     let args = options.args(branch);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match run(repo, &args).await {
@@ -600,6 +850,7 @@ impl RebaseOptions {
 }
 
 pub async fn rebase(repo: &Path, branch: &str, options: &RebaseOptions) -> Result<(), String> {
+    super::ensure_idle(repo).await?;
     let args = options.args(branch);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let env = [("GIT_SEQUENCE_EDITOR", "true"), ("GIT_EDITOR", "true")];
@@ -624,6 +875,146 @@ mod tests {
             .build()
             .unwrap()
             .block_on(f)
+    }
+
+    #[test]
+    fn a_worktree_is_made_and_removed_and_one_with_work_is_kept() {
+        let repo = Repo::new();
+        commit(&repo, "a.txt", "a\n", "first");
+        let outside = tempfile::tempdir().unwrap();
+        let folder = outside.path().join("wt");
+        let name = folder.to_string_lossy().into_owned();
+        block(worktree_add(repo.path(), &name, "feature", true)).unwrap();
+        assert!(block(worktrees(repo.path()))
+            .unwrap()
+            .iter()
+            .any(|w| w.branch == "feature"));
+        // With work that is not committed, it is not removed unless forced.
+        std::fs::write(folder.join("a.txt"), "changed\n").unwrap();
+        assert!(block(worktree_remove(repo.path(), &folder, false)).is_err());
+        assert!(folder.join("a.txt").exists());
+        block(worktree_remove(repo.path(), &folder, true)).unwrap();
+        assert!(!folder.exists());
+        assert_eq!(block(worktrees(repo.path())).unwrap().len(), 1);
+        // On a branch that exists.
+        block(worktree_add(repo.path(), &name, "feature", false)).unwrap();
+        assert!(folder.exists());
+        assert!(block(worktree_add(repo.path(), "-x", "feature", false)).is_err());
+        assert!(block(worktree_add(repo.path(), &name, "--detach", false)).is_err());
+    }
+
+    #[test]
+    fn the_faulty_commit_is_read_in_the_words_of_old_and_new_git() {
+        let sha = "de1c69889109bb2ab7e156cee6ec620d16cb7086";
+        for said in [
+            format!("{sha} is the first bad commit\ncommit {sha}"),
+            format!("{sha} is the first 'bad' commit\ncommit {sha}"),
+        ] {
+            assert_eq!(first_bad(&said).as_deref(), Some(sha), "{said}");
+        }
+        for said in [
+            "Bisecting: 2 revisions left to test after this (roughly 1 step)",
+            "x is the first bad commit",
+        ] {
+            assert_eq!(first_bad(said), None, "{said}");
+        }
+    }
+
+    #[test]
+    fn a_bisect_finds_the_commit_that_brought_the_fault() {
+        let repo = Repo::new();
+        for n in 1..=8 {
+            let state = if n >= 6 { "broken" } else { "works" };
+            commit(
+                &repo,
+                "state.txt",
+                &format!("{state} {n}\n"),
+                &format!("c{n}"),
+            );
+        }
+        let bad_one = repo.git(&["rev-parse", "HEAD~2"]).trim().to_string();
+        let first = repo.git(&["rev-list", "--max-parents=0", "HEAD"]);
+        // The wrong way round: refused, and nothing is left under way.
+        assert!(block(bisect_start(repo.path(), first.trim(), "HEAD")).is_err());
+        assert!(!block(bisecting(repo.path())));
+        // Work not committed would be in the way.
+        std::fs::write(repo.path().join("state.txt"), "mine\n").unwrap();
+        assert!(block(bisect_start(repo.path(), "HEAD", first.trim())).is_err());
+        repo.git(&["checkout", "-q", "--", "state.txt"]);
+
+        let mut step = block(bisect_start(repo.path(), "", first.trim())).unwrap();
+        for _ in 0..8 {
+            if step.found.is_some() {
+                break;
+            }
+            let text = std::fs::read_to_string(repo.path().join("state.txt")).unwrap();
+            let verdict = if text.starts_with("broken") {
+                Verdict::Bad
+            } else {
+                Verdict::Good
+            };
+            step = block(bisect_mark(repo.path(), verdict)).unwrap();
+        }
+        assert_eq!(step.found, Some(bad_one));
+        block(bisect_stop(repo.path())).unwrap();
+        assert!(!block(bisecting(repo.path())));
+        assert_eq!(repo.git(&["branch", "--show-current"]).trim(), "main");
+    }
+
+    #[test]
+    fn a_repository_is_given_an_identity_of_its_own_and_loses_it() {
+        let repo = Repo::new();
+        block(set_identity(repo.path(), " Ada ", "ada@example.com")).unwrap();
+        let who = block(identity(repo.path()));
+        assert_eq!(
+            (who.name.as_str(), who.email.as_str()),
+            ("Ada", "ada@example.com")
+        );
+        assert!(who.own);
+        assert!(block(set_identity(repo.path(), "", "ada@example.com")).is_err());
+        assert!(block(set_identity(repo.path(), "Ada", "no-at-sign")).is_err());
+        block(set_signing_key(repo.path(), "ABCD1234")).unwrap();
+        block(set_sign_all(repo.path(), true)).unwrap();
+        let who = block(identity(repo.path()));
+        assert_eq!((who.signing_key.as_str(), who.sign_all), ("ABCD1234", true));
+        block(set_signing_key(repo.path(), "")).unwrap();
+        block(set_sign_all(repo.path(), false)).unwrap();
+        block(clear_identity(repo.path())).unwrap();
+        // Twice is not a failure.
+        block(clear_identity(repo.path())).unwrap();
+        let who = block(identity(repo.path()));
+        assert!(!who.own && !who.sign_all);
+    }
+
+    #[test]
+    fn a_signed_commit_is_asked_of_git() {
+        let options = CommitOptions {
+            sign: true,
+            ..CommitOptions::default()
+        };
+        assert_eq!(options.args(), ["--gpg-sign"]);
+        assert!(CommitOptions::default().args().is_empty());
+    }
+
+    #[test]
+    fn a_submodule_is_added() {
+        let source = Repo::new();
+        commit(&source, "lib.txt", "lib\n", "lib");
+        let repo = Repo::new();
+        commit(&repo, "a.txt", "a\n", "first");
+        // git refuses a submodule from a folder unless told it may.
+        std::env::set_var("GIT_ALLOW_PROTOCOL", "file");
+        block(submodule_add(
+            repo.path(),
+            &source.path().to_string_lossy(),
+            "libs/one",
+        ))
+        .unwrap();
+        assert!(repo.path().join("libs/one/lib.txt").exists());
+        let listed = block(submodules(repo.path())).unwrap();
+        assert!(listed.iter().any(|s| s.path == "libs/one"));
+        assert!(block(submodule_add(repo.path(), "-x", "p")).is_err());
+        assert!(block(submodule_add(repo.path(), "url", "")).is_err());
     }
 
     #[test]
@@ -748,6 +1139,7 @@ mod tests {
             author: " Me <me@x> ".into(),
             signoff: true,
             no_verify: true,
+            sign: false,
         };
         assert_eq!(
             options.args(),
