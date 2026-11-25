@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "ardoise-git"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "ardoise-plugin",
  "chrono",
