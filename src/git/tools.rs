@@ -185,13 +185,21 @@ pub struct Bisect {
     pub said: String,
 }
 
+/// The commit git names as the first bad one: `<sha> is the first bad
+/// commit`, with quotes around `bad` since git 2.5x.
+fn first_bad(said: &str) -> Option<String> {
+    said.lines().find_map(|line| {
+        let (sha, rest) = line.split_once(" is the first ")?;
+        let word = rest.strip_suffix(" commit")?.trim_matches('\'');
+        let is_sha = sha.len() >= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+        (is_sha && word == "bad").then(|| sha.to_string())
+    })
+}
+
 /// git's words are read here: they must not be translated.
 async fn bisect_run(repo: &Path, args: &[&str]) -> Result<Bisect, String> {
     let said = run_with(repo, args, None, &[("LC_ALL", "C")]).await?;
-    let found = said
-        .lines()
-        .find_map(|l| l.strip_suffix(" is the first bad commit"))
-        .map(str::to_string);
+    let found = first_bad(&said);
     let current = run(repo, &["log", "-1", "--format=%h %s"]).await?;
     Ok(Bisect {
         current: current.trim().to_string(),
@@ -893,6 +901,23 @@ mod tests {
         assert!(folder.exists());
         assert!(block(worktree_add(repo.path(), "-x", "feature", false)).is_err());
         assert!(block(worktree_add(repo.path(), &name, "--detach", false)).is_err());
+    }
+
+    #[test]
+    fn the_faulty_commit_is_read_in_the_words_of_old_and_new_git() {
+        let sha = "de1c69889109bb2ab7e156cee6ec620d16cb7086";
+        for said in [
+            format!("{sha} is the first bad commit\ncommit {sha}"),
+            format!("{sha} is the first 'bad' commit\ncommit {sha}"),
+        ] {
+            assert_eq!(first_bad(&said).as_deref(), Some(sha), "{said}");
+        }
+        for said in [
+            "Bisecting: 2 revisions left to test after this (roughly 1 step)",
+            "x is the first bad commit",
+        ] {
+            assert_eq!(first_bad(said), None, "{said}");
+        }
     }
 
     #[test]
