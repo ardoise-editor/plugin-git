@@ -60,8 +60,9 @@ fn command(repo: &Path, args: &[&str], env: &[(&str, &str)], stdin: bool) -> Com
         .kill_on_drop(true);
     // Paths are names, not patterns: `app/[id]/page.tsx` is one file. (`git
     // stash` builds pathspecs of its own, which this would break; its callers
-    // quote their paths with `:(literal)`.)
-    if args.first() != Some(&"stash") {
+    // quote their paths with `:(literal)`. `git check-ignore` takes names
+    // only, and refuses to be told so.)
+    if !matches!(args.first(), Some(&"stash" | &"check-ignore")) {
         command.env("GIT_LITERAL_PATHSPECS", "1");
     }
     command
@@ -411,6 +412,24 @@ impl Status {
     }
 }
 
+/// Refuses to start what could be taken back (a merge, a pull, a rebase, a
+/// rewrite…) while an operation is already stopped half way: should the new
+/// one fail, its `--abort` would throw away the user's own, with the
+/// conflicts they settled.
+pub async fn ensure_idle(repo: &Path) -> Result<(), String> {
+    let Some(current) = operation(repo).await else {
+        return Ok(());
+    };
+    let name = match current {
+        Operation::Merge => t!("git.op_merge"),
+        Operation::Rebase => t!("git.op_rebase"),
+        Operation::CherryPick => t!("git.op_cherry_pick"),
+        Operation::Revert => t!("git.op_revert"),
+    }
+    .to_string();
+    Err(t!("git.err_operation", op = name.as_str()).to_string())
+}
+
 /// What an operation says when it stops on conflicts (they are left in place
 /// to settle).
 pub const CONFLICT: &str = "conflict";
@@ -436,15 +455,39 @@ pub async fn stopped(repo: &Path, error: String, abort: &[&str]) -> String {
 /// Keeps one side of a conflicted file and marks it settled. `rebasing`:
 /// git's "ours" is then the branch being rebased onto, not the user's work.
 pub async fn accept(repo: &Path, path: &str, yours: bool, rebasing: bool) -> Result<(), String> {
-    let side = if yours != rebasing {
-        "--ours"
+    let (side, stage) = if yours != rebasing {
+        ("--ours", "2")
     } else {
-        "--theirs"
+        ("--theirs", "3")
     };
-    match run(repo, &["checkout", side, "--", path]).await {
-        Ok(_) => run(repo, &["add", "--", path]).await.map(|_| ()),
+    // What git keeps of the conflict, one line a version:
+    // `<mode> <sha> <stage>\t<path>`. That says whether the side kept has the
+    // file; a command that fails says nothing of the kind.
+    let versions = run(repo, &["ls-files", "-u", "-z", "--", path]).await?;
+    let stages: Vec<&str> = versions
+        .split('\0')
+        .filter_map(|entry| entry.split('\t').next()?.split(' ').nth(2))
+        .collect();
+    if stages.is_empty() {
+        return Err(t!("git.already_resolved").to_string());
+    }
+    if stages.contains(&stage) {
+        // A checkout that fails (a filter that does not run) has already
+        // taken the file away: it is put back as it was.
+        let file = repo.join(path);
+        let before = tokio::fs::read(&file).await.ok();
+        if let Err(error) = run(repo, &["checkout", side, "--", path]).await {
+            if let Some(content) = before.filter(|_| !file.exists()) {
+                tokio::fs::write(&file, content)
+                    .await
+                    .map_err(|e| format!("{error}\n{path}: {e}"))?;
+            }
+            return Err(error);
+        }
+        run(repo, &["add", "--", path]).await.map(|_| ())
+    } else {
         // That side deleted the file: keeping it means deleting.
-        Err(_) => run(repo, &["rm", "-f", "--", path]).await.map(|_| ()),
+        run(repo, &["rm", "-f", "--", path]).await.map(|_| ())
     }
 }
 
@@ -633,6 +676,7 @@ impl std::fmt::Display for MergeMode {
 
 /// Merges a branch into the current one.
 pub async fn merge_branch(repo: &Path, branch: &str, mode: MergeMode) -> Result<(), String> {
+    ensure_idle(repo).await?;
     let mut args = vec!["merge", "--no-edit"];
     args.extend(mode.flag());
     args.push(branch);
@@ -646,6 +690,7 @@ pub async fn merge_branch(repo: &Path, branch: &str, mode: MergeMode) -> Result<
 /// `from` (a remote and one of its branches). What is not committed is put
 /// aside meanwhile.
 pub async fn pull(repo: &Path, mode: PullMode, from: Option<(&str, &str)>) -> Result<(), String> {
+    ensure_idle(repo).await?;
     let mut args = vec!["pull", "--autostash", mode.flag()];
     if mode == PullMode::Merge {
         args.push("--no-edit");
@@ -668,6 +713,7 @@ pub async fn pull(repo: &Path, mode: PullMode, from: Option<(&str, &str)>) -> Re
 
 /// Replays the current branch on top of another.
 pub async fn rebase_onto(repo: &Path, branch: &str) -> Result<(), String> {
+    ensure_idle(repo).await?;
     match run(repo, &["rebase", branch]).await {
         Ok(_) => Ok(()),
         Err(e) => Err(stopped(repo, e, &["rebase", "--abort"]).await),
@@ -757,12 +803,30 @@ pub async fn stage(repo: &Path, paths: &[String]) -> Result<(), String> {
     run(repo, &args).await.map(|_| ())
 }
 
+/// The paths of the index a staged change is about: a rename is two of them,
+/// and unstaging the new name alone would leave the old one deleted.
+pub fn index_paths(change: &Change) -> Vec<String> {
+    let mut paths = vec![change.path.clone()];
+    if change.kind == Kind::Renamed {
+        paths.extend(change.from.clone());
+    }
+    paths
+}
+
 pub async fn unstage(repo: &Path, paths: &[String]) -> Result<(), String> {
     let mut args = vec!["restore", "--staged", "--"];
     args.extend(paths.iter().map(String::as_str));
-    // A repository without a commit has no HEAD to restore from.
     match run(repo, &args).await {
         Ok(_) => Ok(()),
+        // A repository without a commit has no HEAD to restore from. With
+        // one, the failure is said: `rm --cached` would stage a deletion.
+        Err(error)
+            if run(repo, &["rev-parse", "--verify", "-q", "HEAD"])
+                .await
+                .is_ok() =>
+        {
+            Err(error)
+        }
         Err(_) => {
             let mut args = vec!["rm", "--cached", "-r", "--"];
             args.extend(paths.iter().map(String::as_str));
@@ -1046,17 +1110,34 @@ pub async fn stash_file(repo: &Path, path: &str, message: &str) -> Result<(), St
     run(repo, &args).await.map(|_| ())
 }
 
+/// A path as a line of `.gitignore` that means this file and no other: what
+/// would be read as a pattern is escaped.
+fn ignore_pattern(path: &str) -> String {
+    let mut out = String::from("/");
+    for c in path.chars() {
+        if matches!(c, '\\' | '*' | '?' | '[') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    // Spaces at the end of a line are dropped unless escaped.
+    let spaces = out.len() - out.trim_end_matches(' ').len();
+    out.truncate(out.len() - spaces);
+    out.push_str(&"\\ ".repeat(spaces));
+    out
+}
+
 /// Adds a file to the `.gitignore` of the repository (made if it is not
 /// there). A file git already tracks is taken out of the index too (its
 /// copy on disk stays), else the line would change nothing.
 pub async fn ignore_file(repo: &Path, path: &str) -> Result<bool, String> {
+    if path.contains(['\n', '\r']) {
+        return Err(t!("git.err_ignore", file = path).to_string());
+    }
     let file = repo.join(".gitignore");
     let mut text = tokio::fs::read_to_string(&file).await.unwrap_or_default();
-    let pattern = format!("/{path}");
-    if !text
-        .lines()
-        .any(|l| l.trim() == pattern || l.trim() == path)
-    {
+    let pattern = ignore_pattern(path);
+    if !text.lines().any(|l| l == pattern) {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
@@ -1065,6 +1146,14 @@ pub async fn ignore_file(repo: &Path, path: &str) -> Result<bool, String> {
         write_whole(file.clone(), text)
             .await
             .map_err(|e| format!(".gitignore: {e}"))?;
+    }
+    // Nothing is taken out of git unless the rules really ignore the file (a
+    // later `!` rule, or a deeper `.gitignore`, can bring it back).
+    if run(repo, &["check-ignore", "-q", "--no-index", "--", path])
+        .await
+        .is_err()
+    {
+        return Err(t!("git.err_ignore", file = path).to_string());
     }
     let tracked = run(repo, &["ls-files", "--error-unmatch", "--", path])
         .await
@@ -2515,5 +2604,212 @@ mod tests {
             repo.git(&["status", "--porcelain"]),
             " D old.txt\n?? new.txt\n"
         );
+    }
+}
+
+/// What once threw the user's work away.
+#[cfg(test)]
+mod safety_tests {
+    use super::testing::*;
+    use super::*;
+
+    /// `main` and `side` both change `f.txt`: bringing one into the other
+    /// conflicts.
+    fn diverged() -> Repo {
+        let r = Repo::new();
+        r.write("f.txt", "base\n");
+        r.commit_all("base");
+        r.git(&["checkout", "-q", "-b", "side"]);
+        r.write("f.txt", "side\n");
+        r.commit_all("side");
+        r.git(&["checkout", "-q", "main"]);
+        r.write("f.txt", "main\n");
+        r.commit_all("main");
+        r
+    }
+
+    fn read(r: &Repo, name: &str) -> String {
+        std::fs::read_to_string(r.path().join(name)).unwrap_or_else(|_| "<absent>".into())
+    }
+
+    fn settle(r: &Repo) {
+        r.write("f.txt", "my resolution\n");
+        r.git(&["add", "f.txt"]);
+    }
+
+    /// The operation and the resolution are still there.
+    fn kept(r: &Repo, operation_expected: Operation) {
+        assert_eq!(read(r, "f.txt"), "my resolution\n");
+        assert_eq!(block(operation(r.path())), Some(operation_expected));
+    }
+
+    #[test]
+    fn nothing_that_can_be_aborted_starts_during_a_merge() {
+        let r = diverged();
+        let remote = tempfile::tempdir().unwrap();
+        let remote = remote.path().to_str().unwrap();
+        r.git(&["init", "-q", "--bare", remote]);
+        r.git(&["remote", "add", "origin", remote]);
+        r.git(&["push", "-q", "-u", "origin", "main"]);
+        let side = r.git(&["rev-parse", "side"]).trim().to_string();
+        assert_eq!(
+            block(merge_branch(r.path(), "side", MergeMode::Default)),
+            Err(CONFLICT.to_string())
+        );
+        settle(&r);
+        let one = std::slice::from_ref(&side);
+        let refused = [
+            block(merge_branch(r.path(), "side", MergeMode::Default)),
+            block(pull(r.path(), PullMode::Merge, None)),
+            block(pull(r.path(), PullMode::Rebase, None)),
+            block(rebase_onto(r.path(), "side")),
+            block(tools::merge(r.path(), "side", &Default::default())),
+            block(tools::rebase(r.path(), "side", &Default::default())),
+            block(history::cherry_pick(r.path(), one)),
+            block(history::revert(r.path(), one)),
+            block(tools::fixup(r.path(), "HEAD", false)),
+            block(tools::apply_patch(
+                r.path(),
+                "From 0000\nSubject: x\n\ndiff\n",
+            )),
+        ];
+        for result in refused {
+            assert!(result.is_err());
+        }
+        kept(&r, Operation::Merge);
+    }
+
+    #[test]
+    fn a_rebase_or_a_cherry_pick_half_done_is_left_alone() {
+        let r = diverged();
+        r.git(&["checkout", "-q", "side"]);
+        assert!(block(rebase_onto(r.path(), "main")).is_err());
+        settle(&r);
+        assert!(block(rebase_onto(r.path(), "main")).is_err());
+        let head = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+        assert!(block(history::drop_commits(r.path(), &[head])).is_err());
+        kept(&r, Operation::Rebase);
+
+        let r = diverged();
+        let side = r.git(&["rev-parse", "side"]).trim().to_string();
+        let one = std::slice::from_ref(&side);
+        assert!(block(history::cherry_pick(r.path(), one)).is_err());
+        settle(&r);
+        assert!(block(history::cherry_pick(r.path(), one)).is_err());
+        kept(&r, Operation::CherryPick);
+    }
+
+    #[test]
+    fn accepting_a_side_never_deletes_a_file_because_a_command_failed() {
+        let r = diverged();
+        r.write(".gitattributes", "*.txt filter=broken\n");
+        assert!(block(merge_branch(r.path(), "side", MergeMode::Default)).is_err());
+        // A filter that must run and fails, as git-lfs when it is missing.
+        r.git(&["config", "filter.broken.smudge", "false"]);
+        r.git(&["config", "filter.broken.clean", "cat"]);
+        r.git(&["config", "filter.broken.required", "true"]);
+        let conflicted = read(&r, "f.txt");
+        assert!(block(accept(r.path(), "f.txt", true, false)).is_err());
+        // The file is there as it was, still in conflict.
+        assert_eq!(read(&r, "f.txt"), conflicted);
+        assert!(!r.git(&["ls-files", "-u"]).is_empty());
+    }
+
+    #[test]
+    fn accepting_the_side_that_deleted_the_file_deletes_it() {
+        let r = Repo::new();
+        r.write("f.txt", "base\n");
+        r.commit_all("base");
+        r.git(&["checkout", "-q", "-b", "side"]);
+        r.git(&["rm", "-q", "f.txt"]);
+        r.git(&["commit", "-q", "-m", "gone"]);
+        r.git(&["checkout", "-q", "main"]);
+        r.write("f.txt", "changed\n");
+        r.commit_all("changed");
+        assert!(block(merge_branch(r.path(), "side", MergeMode::Default)).is_err());
+        block(accept(r.path(), "f.txt", false, false)).unwrap();
+        assert!(!r.path().join("f.txt").exists());
+        // Settled: asking again changes nothing.
+        assert!(block(accept(r.path(), "f.txt", true, false)).is_err());
+    }
+
+    #[test]
+    fn a_name_with_the_signs_of_a_pattern_is_ignored_as_a_name() {
+        for name in ["app/[id]/page.tsx", "a*b?.txt", "#note", "!keep", "end "] {
+            let r = Repo::new();
+            r.write(name, "x\n");
+            r.write("app/i/page.tsx", "the neighbour\n");
+            r.commit_all("c");
+            assert_eq!(block(ignore_file(r.path(), name)), Ok(true), "{name}");
+            // Out of git, still on disk, and ignored.
+            assert!(r.path().join(name).exists());
+            let status = r.git(&["status", "--porcelain", "--untracked-files=all"]);
+            // Nothing but .gitignore is new: the file is not seen again.
+            let new: Vec<&str> = status.lines().filter(|l| l.starts_with("??")).collect();
+            assert_eq!(new, ["?? .gitignore"], "{name}: {status}");
+        }
+    }
+
+    #[test]
+    fn a_file_a_later_rule_keeps_is_not_taken_out_of_git() {
+        let r = Repo::new();
+        r.write("sub/.gitignore", "!keep.txt\n");
+        r.write("sub/keep.txt", "x\n");
+        r.commit_all("c");
+        assert!(block(ignore_file(r.path(), "sub/keep.txt")).is_err());
+        assert_eq!(r.git(&["ls-files", "sub/keep.txt"]).trim(), "sub/keep.txt");
+    }
+
+    #[test]
+    fn a_rename_is_unstaged_whole() {
+        let r = Repo::new();
+        r.write("old.txt", "the same content\nand more of it\n");
+        r.commit_all("c");
+        r.git(&["mv", "old.txt", "new.txt"]);
+        let change = block(status(r.path(), true)).unwrap().staged[0].clone();
+        block(unstage(r.path(), &index_paths(&change))).unwrap();
+        assert!(block(status(r.path(), true)).unwrap().staged.is_empty());
+        assert!(r.path().join("new.txt").exists());
+    }
+
+    #[test]
+    fn a_remote_branch_never_leads_to_an_unrelated_local_one() {
+        let r = Repo::new();
+        r.write("f.txt", "mine\n");
+        r.commit_all("mine");
+        r.git(&["branch", "feature"]);
+        r.git(&["checkout", "-q", "-b", "other"]);
+        r.write("f.txt", "the fork's\n");
+        r.commit_all("fork");
+        let sha = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+        r.git(&["checkout", "-q", "main"]);
+        r.git(&["remote", "add", "fork", "/nowhere"]);
+        r.git(&["update-ref", "refs/remotes/fork/feature", &sha]);
+        let mut branch = history::Branch {
+            name: "fork/feature".into(),
+            sha,
+            upstream: None,
+            current: false,
+            remote: true,
+            ahead: 0,
+            behind: 0,
+        };
+        assert!(block(history::checkout(r.path(), &branch)).is_err());
+        assert_eq!(r.git(&["branch", "--show-current"]).trim(), "main");
+        // The local branch that follows it is the one to go to.
+        r.git(&["config", "branch.feature.remote", "fork"]);
+        r.git(&["config", "branch.feature.merge", "refs/heads/feature"]);
+        r.git(&[
+            "config",
+            "remote.fork.fetch",
+            "+refs/heads/*:refs/remotes/fork/*",
+        ]);
+        block(history::checkout(r.path(), &branch)).unwrap();
+        assert_eq!(r.git(&["branch", "--show-current"]).trim(), "feature");
+        // With no local branch of that name, one is made that follows it.
+        branch.name = "fork/new".into();
+        r.git(&["update-ref", "refs/remotes/fork/new", &branch.sha]);
+        block(history::checkout(r.path(), &branch)).unwrap();
+        assert_eq!(r.git(&["branch", "--show-current"]).trim(), "new");
     }
 }

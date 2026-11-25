@@ -407,7 +407,10 @@ pub fn event(p: &GitPlugin, ctx: &Ctx, host: &Host, event: &UiEvent) {
         "unstage_all" => {
             let paths = ctx.with(|g| {
                 g.status.as_ref().map_or_else(Vec::new, |s| {
-                    s.staged.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+                    s.staged
+                        .iter()
+                        .flat_map(git::index_paths)
+                        .collect::<Vec<_>>()
                 })
             });
             act(
@@ -465,6 +468,10 @@ pub fn event(p: &GitPlugin, ctx: &Ctx, host: &Host, event: &UiEvent) {
         }
         "no_verify" => {
             ctx.with(|g| g.options.no_verify = checked);
+            ctx.render();
+        }
+        "sign" => {
+            ctx.with(|g| g.options.sign = checked);
             ctx.render();
         }
         "author" => ctx.with(|g| g.options.author = text),
@@ -961,14 +968,30 @@ fn file_action(p: &GitPlugin, ctx: &Ctx, host: &Host, action: &str, staged: bool
             t!("git.stage").to_string(),
             move |repo| async move { ok(git::stage(&repo, &[path]).await, t!("git.file_staged")) },
         ),
-        "file:unstage" => act(
-            p,
-            ctx,
-            t!("git.unstage").to_string(),
-            move |repo| async move { ok(git::unstage(&repo, &[path]).await, t!("git.file_unstaged")) },
-        ),
+        "file:unstage" => {
+            let paths = git::index_paths(&change);
+            act(
+                p,
+                ctx,
+                t!("git.unstage").to_string(),
+                move |repo| async move {
+                    ok(git::unstage(&repo, &paths).await, t!("git.file_unstaged"))
+                },
+            );
+        }
         "confirm:file:rollback" => {
             if !ctx.with(|g| g.confirm(action)) {
+                // Rolled back from the index, the file goes back to HEAD:
+                // what was changed since it was staged goes too, and that is
+                // said before the yes.
+                ctx.with(|g| {
+                    if staged && g.change(false, &path).is_some() {
+                        g.notice = Some((
+                            t!("git.rollback_both", file = path.as_str()).to_string(),
+                            true,
+                        ));
+                    }
+                });
                 ctx.render();
                 return;
             }
@@ -1500,10 +1523,102 @@ fn tool_opened(p: &GitPlugin, ctx: &Ctx) {
                 let lines = repo_lines(&ctx.with(|g| g.workspace.clone())).await;
                 ctx.with(|g| g.repos = lines);
             }
+            Tool::Bisect => {
+                let Some(repo) = repo else {
+                    return;
+                };
+                let current = tools::bisect_current(&repo).await;
+                ctx.with(|g| {
+                    // What was found stays on show until the search ends.
+                    let same = matches!(
+                        (&g.bisect, &current),
+                        (Some(old), Some(new)) if old.current == new.current
+                    );
+                    if !same {
+                        g.bisect = current;
+                    }
+                });
+            }
+            Tool::Identity => {
+                let Some(repo) = repo else {
+                    return;
+                };
+                let who = tools::identity(&repo).await;
+                ctx.with(|g| show_identity(g, who));
+            }
             Tool::Patch | Tool::Clean | Tool::Clone | Tool::File => {}
         }
         ctx.render();
     });
+}
+
+/// The identity read, in the panel and in its fields.
+fn show_identity(g: &mut crate::state::Git, who: tools::Identity) {
+    g.identity_name = who.name.clone();
+    g.identity_email = who.email.clone();
+    g.identity_key = who.signing_key.clone();
+    g.identity = who;
+}
+
+/// Changes the submodules or the worktrees, then lists them again.
+fn trees_action<F>(p: &GitPlugin, ctx: &Ctx, label: String, op: impl FnOnce(PathBuf) -> F)
+where
+    F: Future<Output = Result<(), String>> + Send + 'static,
+{
+    let Some(repo) = ctx.repo() else {
+        return;
+    };
+    let work = op(repo.clone());
+    let ctx2 = ctx.clone();
+    act(p, ctx, label, move |_| async move {
+        let result = work.await;
+        let submodules = tools::submodules(&repo).await.unwrap_or_default();
+        let worktrees = tools::worktrees(&repo).await.unwrap_or_default();
+        ctx2.with(|g| {
+            g.submodules = submodules;
+            g.worktrees = worktrees;
+        });
+        ok(result, "")
+    });
+}
+
+/// A step of the search for a fault: what git checked out is shown.
+fn bisect_action<F>(p: &GitPlugin, ctx: &Ctx, op: impl FnOnce(PathBuf) -> F)
+where
+    F: Future<Output = Result<Option<tools::Bisect>, String>> + Send + 'static,
+{
+    let ctx2 = ctx.clone();
+    act(p, ctx, t!("git.bisect_title").to_string(), move |repo| {
+        let work = op(repo);
+        async move {
+            let state = work.await?;
+            ctx2.with(|g| g.bisect = state);
+            Ok(String::new())
+        }
+    });
+}
+
+/// A change of the identity, then it is read again.
+fn identity_action<F>(p: &GitPlugin, ctx: &Ctx, op: impl FnOnce(PathBuf) -> F)
+where
+    F: Future<Output = Result<(), String>> + Send + 'static,
+{
+    let Some(repo) = ctx.repo() else {
+        return;
+    };
+    let work = op(repo.clone());
+    let ctx2 = ctx.clone();
+    act(
+        p,
+        ctx,
+        t!("git.identity_title").to_string(),
+        move |_| async move {
+            work.await?;
+            let who = tools::identity(&repo).await;
+            ctx2.with(|g| show_identity(g, who));
+            Ok(t!("git.identity_saved").to_string())
+        },
+    );
 }
 
 /// The repositories of the projects: each project, and the folders right
@@ -1919,6 +2034,116 @@ fn tool_event(p: &GitPlugin, ctx: &Ctx, host: &Host, action: &str, text: String,
                 },
             );
         }
+        "submodule_url" => ctx.with(|g| g.submodule_url = text),
+        "submodule_path" => ctx.with(|g| g.submodule_path = text),
+        "submodule:add" => {
+            let (url, path) = ctx.with(|g| (g.submodule_url.clone(), g.submodule_path.clone()));
+            trees_action(
+                p,
+                ctx,
+                t!("git.submodule_add").to_string(),
+                move |repo| async move { tools::submodule_add(&repo, &url, &path).await },
+            );
+        }
+        "worktree_folder" => ctx.with(|g| g.worktree_folder = text),
+        "worktree_branch" => ctx.with(|g| g.worktree_branch = text),
+        "worktree_new" => {
+            ctx.with(|g| g.worktree_new = checked);
+            ctx.render();
+        }
+        "worktree:add" => {
+            let (folder, branch, new) = ctx.with(|g| {
+                (
+                    g.worktree_folder.clone(),
+                    g.worktree_branch.clone(),
+                    g.worktree_new,
+                )
+            });
+            trees_action(
+                p,
+                ctx,
+                t!("git.worktree_add").to_string(),
+                move |repo| async move { tools::worktree_add(&repo, &folder, &branch, new).await },
+            );
+        }
+        a if a.starts_with("confirm:worktree:") => {
+            if !ctx.with(|g| g.confirm(a)) {
+                ctx.render();
+                return;
+            }
+            let rest = a.trim_start_matches("confirm:worktree:");
+            let Some((how, path)) = rest.split_once(':') else {
+                return;
+            };
+            let force = how == "force";
+            let folder = PathBuf::from(path);
+            let ctx2 = ctx.clone();
+            trees_action(
+                p,
+                ctx,
+                t!("git.worktree_remove").to_string(),
+                move |repo| async move {
+                    let result = tools::worktree_remove(&repo, &folder, force).await;
+                    let kept = result.is_err().then_some(folder);
+                    ctx2.with(|g| g.worktree_kept = kept);
+                    result
+                },
+            );
+        }
+
+        // Bisect
+        "bisect_good" => {
+            ctx.with(|g| g.bisect_good = text);
+            ctx.render();
+        }
+        "bisect_bad" => ctx.with(|g| g.bisect_bad = text),
+        "bisect:start" => {
+            let (bad, good) = ctx.with(|g| (g.bisect_bad.clone(), g.bisect_good.clone()));
+            bisect_action(p, ctx, move |repo| async move {
+                tools::bisect_start(&repo, &bad, &good).await.map(Some)
+            });
+        }
+        "bisect:good" | "bisect:bad" | "bisect:skip" => {
+            let verdict = match action {
+                "bisect:good" => tools::Verdict::Good,
+                "bisect:bad" => tools::Verdict::Bad,
+                _ => tools::Verdict::Skip,
+            };
+            bisect_action(p, ctx, move |repo| async move {
+                tools::bisect_mark(&repo, verdict).await.map(Some)
+            });
+        }
+        "bisect:stop" => bisect_action(p, ctx, |repo| async move {
+            tools::bisect_stop(&repo).await.map(|_| None)
+        }),
+
+        // Identity
+        "identity_name" => ctx.with(|g| g.identity_name = text),
+        "identity_email" => ctx.with(|g| g.identity_email = text),
+        "identity_key" => ctx.with(|g| g.identity_key = text),
+        "identity:save" => {
+            let (name, email) = ctx.with(|g| (g.identity_name.clone(), g.identity_email.clone()));
+            identity_action(p, ctx, move |repo| async move {
+                tools::set_identity(&repo, &name, &email).await
+            });
+        }
+        "identity:clear" => {
+            identity_action(
+                p,
+                ctx,
+                |repo| async move { tools::clear_identity(&repo).await },
+            )
+        }
+        "identity:key" => {
+            let key = ctx.with(|g| g.identity_key.clone());
+            identity_action(p, ctx, move |repo| async move {
+                tools::set_signing_key(&repo, &key).await
+            });
+        }
+        "identity_sign_all" => identity_action(p, ctx, move |repo| async move {
+            tools::set_sign_all(&repo, checked).await
+        }),
+
         "worktrees" | "repos" => {
             let root = PathBuf::from(&text);
             ctx.with(|g| {

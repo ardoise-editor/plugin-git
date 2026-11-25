@@ -437,6 +437,7 @@ fn commit_tab(g: &Git) -> Node {
                     t!("git.no_verify").to_string(),
                     g.options.no_verify,
                 ),
+                checkbox("sign", t!("git.sign").to_string(), g.options.sign),
                 input(
                     "author",
                     g.options.author.clone(),
@@ -1094,6 +1095,168 @@ fn branches_tab(g: &Git) -> Node {
     column(parts).spacing(6.0)
 }
 
+/// The worktrees: open one, make one, remove one.
+fn worktree_parts(g: &Git, free: bool, parts: &mut Vec<Node>) {
+    parts.push(text(t!("git.worktrees").to_string()).style(TextStyle::Heading));
+    parts.push(list(
+        "worktrees",
+        g.worktrees.iter().map(|w| {
+            item(w.path.display().to_string(), w.path.display().to_string())
+                .detail(w.branch.clone())
+        }),
+    ));
+    // Neither the main one nor the one on show can be removed.
+    for w in g.worktrees.iter().skip(1) {
+        if g.repo.as_ref() == Some(&w.path) {
+            continue;
+        }
+        let path = w.path.display().to_string();
+        let mut line = vec![
+            text(path.clone()).style(TextStyle::Mono),
+            armed_button(
+                g,
+                t!("git.worktree_remove").to_string(),
+                &format!("confirm:worktree:rm:{path}"),
+                free,
+            ),
+        ];
+        if g.worktree_kept.as_ref() == Some(&w.path) {
+            line.push(armed_button(
+                g,
+                t!("git.worktree_force").to_string(),
+                &format!("confirm:worktree:force:{path}"),
+                free,
+            ));
+        }
+        parts.push(row(line).spacing(6.0));
+    }
+    parts.push(
+        row([
+            input(
+                "worktree_folder",
+                g.worktree_folder.clone(),
+                t!("git.worktree_folder").to_string(),
+            ),
+            input(
+                "worktree_branch",
+                g.worktree_branch.clone(),
+                t!("git.new_branch_name").to_string(),
+            ),
+            checkbox(
+                "worktree_new",
+                t!("git.worktree_new").to_string(),
+                g.worktree_new,
+            ),
+            tool_button(t!("git.worktree_add").to_string(), "worktree:add", free),
+        ])
+        .spacing(6.0),
+    );
+}
+
+fn bisect_parts(g: &Git, free: bool, parts: &mut Vec<Node>) {
+    parts.push(text(t!("git.bisect_help").to_string()).style(TextStyle::Muted));
+    let Some(bisect) = &g.bisect else {
+        parts.extend([
+            input(
+                "bisect_good",
+                g.bisect_good.clone(),
+                t!("git.bisect_good_rev").to_string(),
+            ),
+            input(
+                "bisect_bad",
+                g.bisect_bad.clone(),
+                t!("git.bisect_bad_rev").to_string(),
+            ),
+            button(t!("git.bisect_start").to_string(), "bisect:start")
+                .button_style(ButtonStyle::Primary)
+                .enabled(free && !g.bisect_good.trim().is_empty()),
+        ]);
+        return;
+    };
+    match &bisect.found {
+        Some(sha) => {
+            parts.push(
+                text(t!("git.bisect_found", sha = &sha[..sha.len().min(10)]).to_string())
+                    .style(TextStyle::Bold),
+            );
+        }
+        None => {
+            parts.push(
+                text(t!("git.bisect_try", commit = bisect.current.as_str()).to_string())
+                    .style(TextStyle::Bold),
+            );
+        }
+    }
+    if !bisect.said.is_empty() {
+        parts.push(text(bisect.said.clone()).style(TextStyle::Mono));
+    }
+    let on = free && bisect.found.is_none();
+    parts.push(
+        row([
+            tool_button(t!("git.bisect_good").to_string(), "bisect:good", on),
+            tool_button(t!("git.bisect_bad").to_string(), "bisect:bad", on),
+            tool_button(t!("git.bisect_skip").to_string(), "bisect:skip", on),
+            tool_button(t!("git.bisect_stop").to_string(), "bisect:stop", free),
+        ])
+        .spacing(6.0),
+    );
+}
+
+fn identity_parts(g: &Git, free: bool, parts: &mut Vec<Node>) {
+    let who = &g.identity;
+    let now = if who.name.is_empty() && who.email.is_empty() {
+        t!("git.identity_none").to_string()
+    } else {
+        format!("{} <{}>", who.name, who.email)
+    };
+    parts.push(text(now).style(TextStyle::Bold));
+    parts.push(
+        text(if who.own {
+            t!("git.identity_own").to_string()
+        } else {
+            t!("git.identity_global").to_string()
+        })
+        .style(TextStyle::Muted),
+    );
+    parts.extend([
+        input(
+            "identity_name",
+            g.identity_name.clone(),
+            t!("git.identity_name").to_string(),
+        ),
+        input(
+            "identity_email",
+            g.identity_email.clone(),
+            t!("git.identity_email").to_string(),
+        ),
+        row([
+            tool_button(t!("git.identity_save").to_string(), "identity:save", free),
+            tool_button(
+                t!("git.identity_clear").to_string(),
+                "identity:clear",
+                free && who.own,
+            ),
+        ])
+        .spacing(6.0),
+        separator(),
+        text(t!("git.signing").to_string()).style(TextStyle::Heading),
+        row([
+            input(
+                "identity_key",
+                g.identity_key.clone(),
+                t!("git.signing_key").to_string(),
+            ),
+            tool_button(t!("git.signing_key_save").to_string(), "identity:key", free),
+        ])
+        .spacing(6.0),
+        checkbox(
+            "identity_sign_all",
+            t!("git.sign_all").to_string(),
+            who.sign_all,
+        ),
+    ]);
+}
+
 fn tools_tab(g: &Git) -> Node {
     let free = g.busy.is_none();
     let has_repo = g.repo.is_some();
@@ -1465,15 +1628,26 @@ fn tools_tab(g: &Git) -> Node {
                     .style(TextStyle::Mono),
                 );
             }
-            parts.push(text(t!("git.worktrees").to_string()).style(TextStyle::Heading));
-            parts.push(list(
-                "worktrees",
-                g.worktrees.iter().map(|w| {
-                    item(w.path.display().to_string(), w.path.display().to_string())
-                        .detail(w.branch.clone())
-                }),
-            ));
+            parts.push(
+                row([
+                    input(
+                        "submodule_url",
+                        g.submodule_url.clone(),
+                        t!("git.clone_url").to_string(),
+                    ),
+                    input(
+                        "submodule_path",
+                        g.submodule_path.clone(),
+                        t!("git.submodule_path").to_string(),
+                    ),
+                    tool_button(t!("git.submodule_add").to_string(), "submodule:add", free),
+                ])
+                .spacing(6.0),
+            );
+            worktree_parts(g, free, &mut parts);
         }
+        Tool::Bisect => bisect_parts(g, free, &mut parts),
+        Tool::Identity => identity_parts(g, free, &mut parts),
         Tool::Clone => {
             parts.extend([
                 input(
@@ -1624,6 +1798,70 @@ mod tests {
         ] {
             assert_eq!(enabled_of(&page, tab), Some(true), "{tab}");
         }
+    }
+
+    #[test]
+    fn a_worktree_can_be_removed_but_not_the_main_one_nor_the_one_on_show() {
+        use crate::git::tools::Worktree;
+        let tree = |path: &str| Worktree {
+            path: path.into(),
+            branch: "b".into(),
+        };
+        let mut g = Git::new();
+        g.repo = Some("/shown".into());
+        g.tab = Tab::Tools;
+        g.tool = Tool::Trees;
+        g.worktrees = vec![tree("/main"), tree("/shown"), tree("/other")];
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("confirm:worktree:rm:/other"));
+        assert!(!drawn.contains("confirm:worktree:rm:/main"));
+        assert!(!drawn.contains("confirm:worktree:rm:/shown"));
+        // Forcing is offered only after git refused.
+        assert!(!drawn.contains("confirm:worktree:force:"));
+        g.worktree_kept = Some("/other".into());
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("confirm:worktree:force:/other"));
+        assert!(drawn.contains("submodule:add"));
+    }
+
+    #[test]
+    fn a_bisect_asks_for_its_ends_then_for_a_verdict() {
+        use crate::git::tools::Bisect;
+        let mut g = Git::new();
+        g.repo = Some("/r".into());
+        g.tab = Tab::Tools;
+        g.tool = Tool::Bisect;
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("bisect:start") && !drawn.contains("bisect:good\""));
+        g.bisect = Some(Bisect {
+            current: "abc123 a change".into(),
+            ..Bisect::default()
+        });
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("abc123 a change") && drawn.contains("bisect:skip"));
+        g.bisect.as_mut().unwrap().found = Some("0123456789abcdef".into());
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("0123456789") && drawn.contains("bisect:stop"));
+    }
+
+    #[test]
+    fn the_identity_shows_who_commits_and_the_signing() {
+        let mut g = Git::new();
+        g.repo = Some("/r".into());
+        g.tab = Tab::Tools;
+        g.tool = Tool::Identity;
+        g.identity.name = "Ada".into();
+        g.identity.email = "ada@example.com".into();
+        let drawn = serde_json::to_string(&panel(&g)).unwrap();
+        assert!(drawn.contains("Ada <ada@example.com>"));
+        assert!(drawn.contains("identity:save") && drawn.contains("identity_sign_all"));
+        // The signing of one commit is among its options.
+        g.tab = Tab::Commit;
+        g.show_options = true;
+        g.status = Some(Default::default());
+        assert!(serde_json::to_string(&panel(&g))
+            .unwrap()
+            .contains("\"sign\""));
     }
 
     #[test]
